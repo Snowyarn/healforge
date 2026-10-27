@@ -1,0 +1,170 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body {
+    margin: 0;
+    padding: 0;
+    background-color: #f8fafa;
+    color: #191c1d;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+  }
+}
+
+/* Skeleton Loading Shimmer */
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    #eceeee 0%,
+    #f4f6f6 50%,
+    #eceeee 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.8s infinite ease-in-out;
+}
+
+.skeleton-shimmer-dark {
+  background: linear-gradient(
+    90deg,
+    #182622 0%,
+    #243630 50%,
+    #182622 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.8s infinite ease-in-out;
+}
+
+/* Technical Hero & Workflow Keyframes */
+@keyframes scanline {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  50% {
+    opacity: 0.8;
+  }
+  100% {
+    transform: translateY(400%);
+    opacity: 0;
+  }
+}
+
+.animate-scanline {
+  animation: scanline 4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes data-flow {
+  0% {
+    stroke-dashoffset: 100;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animate-data-flow {
+  stroke-dasharray: 8 6;
+  animation: data-flow 2.4s linear infinite;
+}
+
+@keyframes data-flow-reverse {
+  0% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: 100;
+  }
+}
+
+.animate-data-flow-reverse {
+  stroke-dasharray: 8 6;
+  animation: data-flow-reverse 2.4s linear infinite;
+}
+
+@keyframes float-slow {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+.animate-float-slow {
+  animation: float-slow 6s ease-in-out infinite;
+}
+
+@keyframes float-delayed {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-float-delayed {
+  animation: float-delayed 5s ease-in-out 1.5s infinite;
+}
+
+@keyframes pulse-halo {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.15);
+  }
+}
+
+.animate-pulse-halo {
+  animation: pulse-halo 3s ease-in-out infinite;
+}
+
+/* Technical Grid Pattern Utility */
+.bg-tech-grid {
+  background-size: 24px 24px;
+  background-image: 
+    linear-gradient(to right, rgba(32, 182, 142, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(32, 182, 142, 0.05) 1px, transparent 1px);
+}
+
+.bg-tech-grid-dense {
+  background-size: 16px 16px;
+  background-image: 
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .skeleton-shimmer,
+  .skeleton-shimmer-dark,
+  .animate-scanline,
+  .animate-data-flow,
+  .animate-data-flow-reverse,
+  .animate-float-slow,
+  .animate-float-delayed,
+  .animate-pulse-halo {
+    animation: none !important;
+    transform: none !important;
+  }
+}
