@@ -21,6 +21,16 @@
 
 ---
 
+## 📋 Project Description & Hashtags
+
+> **Project Overview:**  
+> **HealForge** is an autonomous code security analysis, vulnerability remediation, and patch verification workbench. It bridges the critical gap between static vulnerability alerts (SAST) and production-grade fixes through interprocedural Abstract Syntax Tree (AST) taint analysis, automated pull request generation, and ephemeral gVisor microVM (`runsc`) execution sandbox verification. Every synthesized patch is cryptographically attested to ensure zero regressions before landing in production repositories.
+>
+> **Project Hashtags & Keywords:**  
+> `#HealForge` `#AppSec` `#CyberSecurity` `#DevSecOps` `#VulnerabilityRemediation` `#AST` `#TaintAnalysis` `#gVisor` `#MicroVM` `#ZeroRegression` `#SecurityAutomation` `#React19` `#TypeScript` `#Supabase` `#SAST` `#Hackathon` `#CodeSecurity` `#CloudSecurity`
+
+---
+
 ## 📌 Executive Summary
 
 Modern static application security testing (SAST) tools overwhelm engineering teams with hundreds of noisy, unvalidated vulnerability alerts. **HealForge** closes the loop between **vulnerability discovery** and **production-grade remediation**. 
@@ -287,6 +297,29 @@ Contributions to **HealForge** are warmly welcomed! Please observe the following
    npm run lint
    ```
 5. **Open a Pull Request**: Submit your PR with a clear description of the problem solved and test evidence.
+
+---
+
+## 👥 Maintainers & Lead Contributors
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <a href="https://github.com/Rohi56u">
+          <img src="https://github.com/Rohi56u.png" width="100px;" alt="Rohi56u" style="border-radius: 50%; border: 3px solid #3b82f6;"/><br />
+          <sub><b>Rohi56u</b></sub>
+        </a>
+        <br />
+        <span style="font-size: 0.85em; color: #64748b;">Project Maintainer & Lead Contributor</span>
+        <br />
+        <a href="https://github.com/Rohi56u/healforge/commits?author=Rohi56u">
+          <img src="https://img.shields.io/badge/Contributions-Rohi56u-3b82f6?style=flat-square&logo=github" alt="Rohi56u Contributions" />
+        </a>
+      </td>
+    </tr>
+  </table>
+</div>
 
 ---
 
