@@ -65,7 +65,7 @@ def patch_row(seeded_project, client):
         )
         db.add(patch)
         db.commit()
-        return {"patchId": patch.id, "findingInternalId": finding.id, "findingDisplayId": finding.display_id}
+        return {"patchId": str(patch.id), "findingInternalId": str(finding.id), "findingDisplayId": finding.display_id}
     finally:
         db.close()
 

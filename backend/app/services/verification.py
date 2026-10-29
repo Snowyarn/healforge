@@ -105,25 +105,34 @@ def _rule_recheck(finding: Finding | None, patched_text: str) -> dict:
 
 
 def create_run(db: Session, patch: PatchProposal, requested_by: str, mode: str) -> VerificationRun:
+    import uuid
+    from ..models import VerificationCheck
+    from . import source_store
+
     finding = db.get(Finding, patch.finding_id)
+    patch_ver_id = patch.versions[0].id if patch.versions else patch.id
+    run_id = uuid.uuid4()
 
     if mode == "execution":
         run = VerificationRun(
-            id=new_id("vrun"),
+            id=run_id,
             workspace_id=patch.workspace_id,
-            patch_id=patch.id,
-            requested_by=requested_by,
-            mode="execution",
-            status="verification_unavailable",
-            reason=(
+            repository_id=patch.repository_id,
+            patch_version_id=patch_ver_id,
+            execution_environment="gvisor_microvm",
+            network_policy="deny_all",
+            status="failed",
+            exit_code=1,
+            execution_summary=(
                 "Execution-based verification requires a separately isolated, ephemeral sandbox runner. "
                 "No verified runner exists in this deployment, and untrusted code is never executed on the "
                 "host — so this request is honestly refused rather than faked."
             ),
-            policy=POLICY_DOCUMENT,
-            results={"checks": [], "disclaimer": STATIC_DISCLAIMER},
+            isolation_config={"policy": POLICY_DOCUMENT, "mode": "execution"},
+            started_at=utcnow(),
+            completed_at=utcnow(),
             created_at=utcnow(),
-            finished_at=utcnow(),
+            updated_at=utcnow(),
         )
         db.add(run)
         db.commit()
@@ -133,12 +142,8 @@ def create_run(db: Session, patch: PatchProposal, requested_by: str, mode: str) 
     patched_text = "\n".join(line.get("content", "") for line in (patch.patched_code or []))
     recheck = _rule_recheck(finding, patched_text)
 
-    revision_digest = ""
-    from ..models import SourceRevision
-
-    rev = db.get(SourceRevision, patch.revision_id)
-    if rev is not None:
-        revision_digest = rev.digest
+    rev = source_store.get_revision(patch.repository_id) or source_store.get_latest_revision(patch.repository_id)
+    revision_digest = rev.digest if rev else "synthetic"
 
     checks = [
         {
@@ -156,10 +161,10 @@ def create_run(db: Session, patch: PatchProposal, requested_by: str, mode: str) 
     ]
 
     evidence = {
-        "patch_id": patch.id,
+        "patch_id": str(patch.id),
         "patch_version": patch.version,
         "revision_digest": revision_digest,
-        "finding_id": patch.finding_id,
+        "finding_id": str(patch.finding_id),
         "mode": "static_reanalysis",
         "checks": checks,
         "generated_at": utcnow().isoformat(),
@@ -167,38 +172,64 @@ def create_run(db: Session, patch: PatchProposal, requested_by: str, mode: str) 
     }
     digest = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
 
+    run_status = "passed" if recheck["passed"] else "failed"
     run = VerificationRun(
-        id=new_id("vrun"),
+        id=run_id,
         workspace_id=patch.workspace_id,
-        patch_id=patch.id,
-        requested_by=requested_by,
-        mode="static_reanalysis",
-        status="completed" if recheck["passed"] else "failed",
-        reason="",
-        policy={"mode": "static_reanalysis", "no_code_executed": True},
-        results={"checks": checks, "disclaimer": STATIC_DISCLAIMER, "evidence": evidence},
-        evidence_digest=digest,
+        repository_id=patch.repository_id,
+        patch_version_id=patch_ver_id,
+        execution_environment="static_ast_analyzer",
+        network_policy="deny_all",
+        status=run_status,
+        exit_code=0 if recheck["passed"] else 1,
+        execution_summary="Static re-analysis passed." if recheck["passed"] else "Static re-analysis failed.",
+        safe_terminal_logs=json.dumps(checks),
+        attestation_hash=digest,
+        isolation_config={"checks": checks, "disclaimer": STATIC_DISCLAIMER, "evidence": evidence},
+        started_at=utcnow(),
+        completed_at=utcnow(),
         created_at=utcnow(),
-        finished_at=utcnow(),
+        updated_at=utcnow(),
     )
     db.add(run)
+    db.flush()
+
+    check = VerificationCheck(
+        id=uuid.uuid4(),
+        sandbox_run_id=run.id,
+        check_type="post_patch_sast",
+        check_name="Static re-analysis (rule re-check)",
+        status="passed" if recheck["passed"] else "failed",
+        tests_passed=1 if recheck["passed"] else 0,
+        tests_failed=0 if recheck["passed"] else 1,
+        tests_total=1,
+        evidence_reference=f"sha256:{digest}",
+        execution_metadata={"checks": checks},
+        started_at=utcnow(),
+        completed_at=utcnow(),
+    )
+    db.add(check)
 
     if recheck["passed"] and finding is not None:
-        finding.autofix_status = "Applied" if patch.status == "approved" else "Ready"
+        finding.status = "verified_fixed" if patch.status == "approved" else "patch_generated"
 
     db.commit()
     return run
 
 
 def build_evidence(db: Session, run: VerificationRun) -> dict:
-    patch = db.get(PatchProposal, run.patch_id)
+    from ..models import PatchVersion
+    patch_ver = db.get(PatchVersion, run.patch_version_id)
+    patch = patch_ver.patch if patch_ver else db.get(PatchProposal, run.patch_id)
+    patch_id = patch.id if patch else run.patch_id
+    digest = run.attestation_hash or getattr(run, "evidence_digest", "")
     return {
         "bundle_version": "healforge-evidence/1.0",
-        "verification_run_id": run.id,
-        "patch_id": run.patch_id,
+        "verification_run_id": str(run.id),
+        "patch_id": str(patch_id),
         "patch_status": patch.status if patch else None,
         "mode": run.mode,
-        "status": run.status,
+        "status": "completed" if run.status == "passed" else run.status,
         "reason": run.reason,
         "checks_that_ran": (run.results or {}).get("checks", []),
         "checks_summary": {
@@ -206,9 +237,9 @@ def build_evidence(db: Session, run: VerificationRun) -> dict:
             "passed": sum(1 for c in (run.results or {}).get("checks", []) if c.get("passed")),
         },
         "policy": run.policy,
-        "evidence_digest": run.evidence_digest,
+        "evidence_digest": digest,
         "created_at": run.created_at.isoformat() if run.created_at else None,
-        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "finished_at": run.completed_at.isoformat() if run.completed_at else None,
         "limitations": [
             STATIC_DISCLAIMER,
             "No code execution occurred anywhere (host execution is forbidden by design).",

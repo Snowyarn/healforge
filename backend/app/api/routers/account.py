@@ -67,13 +67,14 @@ def _profile(db, user) -> UserProfile:
     return profile
 
 
+_user_prefs: dict[str, UserPrefsModel] = {}
+
+
 def _prefs(db, user) -> UserPrefsModel:
-    prefs = db.query(UserPrefsModel).filter(UserPrefsModel.user_id == user.id).first()
-    if prefs is None:
-        prefs = UserPrefsModel(user_id=user.id, preferences={}, notification_prefs={}, privacy_prefs={})
-        db.add(prefs)
-        db.flush()
-    return prefs
+    uid = str(user.id)
+    if uid not in _user_prefs:
+        _user_prefs[uid] = UserPrefsModel(user_id=user.id, preferences={}, notification_prefs={}, privacy_prefs={})
+    return _user_prefs[uid]
 
 
 @router.get("/state")

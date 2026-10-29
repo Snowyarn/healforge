@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 
 def test_health_ok(client):
     r = client.get("/api/v1/health")
@@ -21,7 +23,7 @@ def test_session_bootstrap_single_user(client):
     body = r.json()
     assert body["mode"] == "single-user"
     assert body["user"]["username"]
-    assert body["workspace"]["id"].startswith("ws_")
+    assert str(uuid.UUID(body["workspace"]["id"])) == body["workspace"]["id"]
 
 
 def test_register_login_flow(client, temp_db_url, monkeypatch):

@@ -54,14 +54,24 @@ class ScanDiffRequest(BaseModel):
 
 
 def _get_project(db: Session, ctx, project_id: str) -> Project:
-    p = db.get(Project, project_id)
+    import uuid
+    try:
+        val = uuid.UUID(str(project_id))
+        p = db.get(Project, val)
+    except (ValueError, TypeError):
+        p = None
     if p is None or p.workspace_id != ctx.workspace.id:
         raise api_error(404, "project_not_found", "Project not found in this workspace.")
     return p
 
 
 def _get_scan(db: Session, ctx, scan_id: str) -> ScanJob:
-    job = db.get(ScanJob, scan_id)
+    import uuid
+    try:
+        val = uuid.UUID(str(scan_id))
+        job = db.get(ScanJob, val)
+    except (ValueError, TypeError):
+        job = None
     if job is None or job.workspace_id != ctx.workspace.id:
         raise api_error(404, "scan_not_found", "Scan not found in this workspace.")
     return job
@@ -72,7 +82,7 @@ def create_scan(body: ScanCreate, ctx: CtxDep, db: DbDep, request: Request, requ
     require_permission(db, ctx, "run_scans")
     rl.rate_limit(f"scan:{ctx.user.id}", 30, 3600)
     p = _get_project(db, ctx, body.projectId)
-    if body.scanType not in SCAN_TYPES.values():
+    if body.scanType not in SCAN_TYPES and body.scanType not in SCAN_TYPES.values():
         raise api_error(422, "invalid_scan_type", "Unknown scan type.")
     if body.options.modelEnrichment and not body.consent.granted:
         raise api_error(
@@ -80,17 +90,14 @@ def create_scan(body: ScanCreate, ctx: CtxDep, db: DbDep, request: Request, requ
         )
     if body.options.modelEnrichment and not body.consent.redactionAcknowledged:
         raise api_error(400, "consent_required", "You must acknowledge the secret-redaction step.")
+    from ...services import source_store
+
     if body.revisionId:
-        rev = db.get(SourceRevision, body.revisionId)
-        if rev is None or rev.project_id != p.id:
+        rev = source_store.get_revision(body.revisionId)
+        if rev is None or str(rev.project_id) != str(p.id):
             raise api_error(404, "revision_not_found", "Revision not found for this project.")
     else:
-        rev = (
-            db.query(SourceRevision)
-            .filter(SourceRevision.project_id == p.id)
-            .order_by(SourceRevision.created_at.desc())
-            .first()
-        )
+        rev = source_store.get_latest_revision(p.id)
         if rev is None:
             raise api_error(409, "no_source_imported", "Import a source archive for this project before scanning.")
 
@@ -101,25 +108,26 @@ def create_scan(body: ScanCreate, ctx: CtxDep, db: DbDep, request: Request, requ
         return guard.replay
 
     try:
+        import uuid
+        from ...models.workbench import SCAN_TYPE_KEYS
+
+        key = SCAN_TYPE_KEYS.get(body.scanType, body.scanType.lower())
+        if key in ("container", "container_audit"):
+            st = "container_audit"
+        elif key in ("sast", "sbom", "secrets", "composite"):
+            st = key
+        else:
+            st = "sast"
         job = ScanJob(
-            id=new_id("scan"),
+            id=uuid.uuid4(),
             workspace_id=ctx.workspace.id,
-            project_id=p.id,
-            revision_id=rev.id,
-            scan_type=body.scanType,
-            trigger="Manual Scan",
+            repository_id=p.id,
+            scan_type=st,
+            trigger_type="manual",
             status="queued",
-            options={
-                "taintFlow": body.options.taintFlow,
-                "cveCorrelation": body.options.cveCorrelation,
-                "modelEnrichment": body.options.modelEnrichment,
-            },
-            consent_granted=body.consent.granted,
-            consent_granted_at=utcnow() if body.consent.granted else None,
-            consent_scopes=CONSENT_SCOPES if body.consent.granted else [],
-            model_enrichment="not_requested" if not body.options.modelEnrichment else "pending",
-            queued_at=utcnow(),
-            request_id=request_id,
+            created_by=ctx.user.id,
+            created_at=utcnow(),
+            updated_at=utcnow(),
         )
         db.add(job)
         audit(
@@ -138,8 +146,8 @@ def create_scan(body: ScanCreate, ctx: CtxDep, db: DbDep, request: Request, requ
     except Exception:
         idempotency_release(db, guard)
         raise
-    scan_pipeline.submit_scan(job.id)
-    response = {"scanId": job.id, "status": "queued", "poll": f"/api/v1/scans/{job.id}"}
+    scan_pipeline.submit_scan(job.id, options=body.options.model_dump(), consent=body.consent.model_dump())
+    response = {"scanId": str(job.id), "status": "queued", "poll": f"/api/v1/scans/{job.id}"}
     idempotency_store(db, guard, 202, response)
     return response
 
@@ -295,10 +303,25 @@ def list_findings(
     }
 
 
+def _lookup_finding(db: Session, workspace_id, finding_id: str) -> Finding | None:
+    import uuid
+    try:
+        val = uuid.UUID(str(finding_id))
+        f = db.query(Finding).filter(Finding.workspace_id == workspace_id, Finding.id == val).first()
+        if f:
+            return f
+    except (ValueError, TypeError):
+        pass
+    return db.query(Finding).filter(
+        Finding.workspace_id == workspace_id,
+        (Finding.cve_id == finding_id) | (Finding.rule_id == finding_id)
+    ).first()
+
+
 @router.get("/findings/{finding_id}")
 def finding_detail(finding_id: str, ctx: CtxDep, db: DbDep) -> dict:
-    f = db.query(Finding).filter((Finding.id == finding_id) | (Finding.display_id == finding_id)).first()
-    if f is None or f.workspace_id != ctx.workspace.id:
+    f = _lookup_finding(db, ctx.workspace.id, finding_id)
+    if f is None:
         raise api_error(404, "finding_not_found", "Finding not found in this workspace.")
     return {"finding": finding_dto(db, f, full=True)}
 
@@ -307,8 +330,8 @@ def finding_detail(finding_id: str, ctx: CtxDep, db: DbDep) -> dict:
 def request_patch(finding_id: str, ctx: CtxDep, db: DbDep, request: Request, request_id: RequestIdDep) -> dict:
     require_permission(db, ctx, "run_scans")
     rl.rate_limit(f"patchreq:{ctx.user.id}", 20, 3600)
-    f = db.query(Finding).filter((Finding.id == finding_id) | (Finding.display_id == finding_id)).first()
-    if f is None or f.workspace_id != ctx.workspace.id:
+    f = _lookup_finding(db, ctx.workspace.id, finding_id)
+    if f is None:
         raise api_error(404, "finding_not_found", "Finding not found in this workspace.")
     from ...models import PatchProposal
 

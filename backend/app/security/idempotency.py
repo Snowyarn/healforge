@@ -142,7 +142,7 @@ def idempotency_store(db: Session, guard: IdemGuard, status_code: int, response:
         return
     rec.state = "completed"
     rec.response_status = status_code
-    rec.response_body = response
+    rec.response_body = json.loads(json.dumps(response, default=str))
     db.commit()
 
 

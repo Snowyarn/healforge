@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ...models import Finding, PatchProposal, ReviewEvent, VerificationRun
+from ...models import Finding, Patch, PatchProposal, PatchReview, PatchVersion, ReviewEvent, VerificationRun
 from ...models.base import utcnow
 from ...security import rate_limit as rl
 from ...security.idempotency import idempotency_begin, idempotency_release, idempotency_store
@@ -32,7 +32,12 @@ class VerificationRequest(BaseModel):
 
 
 def _get_patch(db: Session, ctx, patch_id: str) -> PatchProposal:
-    patch = db.get(PatchProposal, patch_id)
+    import uuid
+    try:
+        val = uuid.UUID(str(patch_id))
+        patch = db.get(PatchProposal, val)
+    except (ValueError, TypeError):
+        patch = None
     if patch is None or patch.workspace_id != ctx.workspace.id:
         raise api_error(404, "patch_not_found", "Patch not found in this workspace.")
     return patch
@@ -62,7 +67,7 @@ def review_patch(
     require_permission(db, ctx, "review_patches")
     rl.rate_limit(f"review:{ctx.user.id}", 60, 3600)
     patch = _get_patch(db, ctx, patch_id)
-    if patch.status != "pending_review":
+    if patch.status not in ("pending_review", "ready_for_review", "under_review"):
         raise api_error(409, "already_reviewed", f"This patch was already reviewed (current status: {patch.status}).")
     if body.expectedVersion != patch.version:
         raise api_error(
@@ -72,16 +77,31 @@ def review_patch(
     action_map = {"approve": "approved", "reject": "rejected", "request_changes": "changes_requested"}
     new_status = action_map[body.action]
 
-    db.add(
-        ReviewEvent(
+    import uuid
+    if not patch.versions:
+        pv = PatchVersion(
             patch_id=patch.id,
-            user_id=ctx.user.id,
-            action=body.action,
-            notes=body.notes.strip(),
-            patch_version=patch.version,
-            created_at=utcnow(),
+            version_number=patch.version or 1,
+            diff_content=patch.diff or "",
+            original_snippet="",
+            proposed_snippet="",
+            content_hash="init",
         )
+        db.add(pv)
+        db.flush()
+        ver_id = pv.id
+    else:
+        ver_id = patch.versions[0].id
+
+    review = PatchReview(
+        id=uuid.uuid4(),
+        patch_version_id=ver_id,
+        reviewer_id=ctx.user.id,
+        decision=new_status,
+        comments=body.notes.strip(),
+        created_at=utcnow(),
     )
+    db.add(review)
     patch.status = new_status
     patch.updated_at = utcnow()
 
@@ -89,7 +109,7 @@ def review_patch(
     if finding is not None:
         if new_status == "approved":
             finding.autofix_status = "Applied"
-            finding.status = "resolved"
+            finding.status = "verified_fixed"
             finding.resolved_at = utcnow()
         elif new_status == "rejected":
             finding.autofix_status = "Pending"
@@ -135,7 +155,16 @@ def verification_status(ctx: CtxDep) -> dict:
 def list_verification_runs(ctx: CtxDep, db: DbDep, patchId: str = "") -> dict:
     query = db.query(VerificationRun).filter(VerificationRun.workspace_id == ctx.workspace.id)
     if patchId:
-        query = query.filter(VerificationRun.patch_id == patchId)
+        import uuid
+        try:
+            pid = uuid.UUID(str(patchId))
+        except (ValueError, TypeError):
+            pid = patchId
+        pv_ids = [row[0] for row in db.query(PatchVersion.id).filter(PatchVersion.patch_id == pid).all()]
+        if pv_ids:
+            query = query.filter((VerificationRun.patch_version_id.in_(pv_ids)) | (VerificationRun.patch_version_id == pid))
+        else:
+            query = query.filter(VerificationRun.patch_version_id == pid)
     runs = query.order_by(VerificationRun.created_at.desc()).limit(100).all()
     return {"runs": [verification_run_dto(db, r) for r in runs]}
 

@@ -32,6 +32,11 @@ def _reset_rate_limit_buckets():
 def temp_db_url(tmp_path, monkeypatch) -> str:
     url = f"sqlite:///{tmp_path / 'test.db'}"
     monkeypatch.setenv("DATABASE_URL", url)
+    source_db = str(tmp_path / "source_cache.db")
+    monkeypatch.setenv("HEALFORGE_SOURCE_DB", source_db)
+    import app.services.source_store as ss
+
+    monkeypatch.setattr(ss, "DB_PATH", source_db)
     # Rebuild engine/session factories for the isolated DB.
     import importlib
 

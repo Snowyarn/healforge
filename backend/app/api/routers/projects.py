@@ -9,12 +9,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ...config import settings
-from ...models import Finding, Project, ScanJob, SourceFile, SourceRevision
+from ...models import Finding, Project, ScanJob
 from ...models.base import new_id, utcnow
 from ...security import rate_limit as rl
 from ...security.rbac import require_permission
-from ...services import secret_engine
+from ...services import secret_engine, source_store
 from ...services.audit import audit
+from ...services.source_store import SourceFile, SourceRevision
 from ...services.upload import ExtractionResult, UploadError, extract_archive
 from ..deps import CtxDep, DbDep, RequestIdDep, api_error
 from ..serializers import (
@@ -45,7 +46,12 @@ class ProjectPatch(BaseModel):
 
 
 def _get_project(db: Session, ctx, project_id: str) -> Project:
-    p = db.get(Project, project_id)
+    import uuid
+    try:
+        val = uuid.UUID(str(project_id))
+        p = db.get(Project, val)
+    except (ValueError, TypeError):
+        p = None
     if p is None or p.workspace_id != ctx.workspace.id:
         raise api_error(404, "project_not_found", "Project not found in this workspace.")
     return p
@@ -91,7 +97,7 @@ def create_project(body: ProjectCreate, ctx: CtxDep, db: DbDep, request: Request
         description=body.description.strip(),
         runtime=body.runtime.strip() or "Multi-language",
         primary_branch=body.primaryBranch.strip() or "import",
-        provider="zip-archive",
+        provider="other",
         created_by=ctx.user.id,
         created_at=utcnow(),
     )
@@ -115,14 +121,9 @@ def create_project(body: ProjectCreate, ctx: CtxDep, db: DbDep, request: Request
 def project_detail(project_id: str, ctx: CtxDep, db: DbDep) -> dict:
     p = _get_project(db, ctx, project_id)
     dto = project_dto(db, p)
-    findings = db.query(Finding).filter(Finding.project_id == p.id).order_by(Finding.cvss_score.desc()).limit(50).all()
-    scans = db.query(ScanJob).filter(ScanJob.project_id == p.id).order_by(ScanJob.queued_at.desc()).limit(50).all()
-    revisions = (
-        db.query(SourceRevision)
-        .filter(SourceRevision.project_id == p.id)
-        .order_by(SourceRevision.created_at.desc())
-        .all()
-    )
+    findings = db.query(Finding).filter(Finding.repository_id == p.id).order_by(Finding.cvss_score.desc()).limit(50).all()
+    scans = db.query(ScanJob).filter(ScanJob.repository_id == p.id).order_by(ScanJob.created_at.desc()).limit(50).all()
+    revisions = source_store.list_revisions(p.id)
     from ..serializers import finding_dto
 
     dto.update(
@@ -219,35 +220,14 @@ async def upload_source(
     finally:
         data = b""  # free the buffer
 
-    revision = SourceRevision(
-        id=new_id("rev"),
+    revision = source_store.save_revision(
         project_id=p.id,
         digest=result.digest,
         archive_filename=filename[:250],
-        branch_label=p.primary_branch,
-        size_bytes=result.total_text_bytes,
-        file_count=len(result.files),
-        text_file_count=result.text_file_count,
-        total_text_bytes=result.total_text_bytes,
-        created_by=ctx.user.id,
-        created_at=utcnow(),
+        branch_label=p.default_branch,
+        files=result.files,
+        user_id=ctx.user.id,
     )
-    db.add(revision)
-    db.flush()
-    for f in result.files:
-        db.add(
-            SourceFile(
-                id=new_id("sfl"),
-                revision_id=revision.id,
-                path=f.path,
-                is_dir=f.is_dir,
-                size=f.size,
-                language=f.language,
-                content=f.content,
-                content_sha256=f.content_sha256,
-                line_count=f.line_count,
-            )
-        )
     audit(
         db,
         ctx.workspace.id,
@@ -289,12 +269,7 @@ async def upload_source(
 @router.get("/{project_id}/sources")
 def list_sources(project_id: str, ctx: CtxDep, db: DbDep) -> dict:
     p = _get_project(db, ctx, project_id)
-    revisions = (
-        db.query(SourceRevision)
-        .filter(SourceRevision.project_id == p.id)
-        .order_by(SourceRevision.created_at.desc())
-        .all()
-    )
+    revisions = source_store.list_revisions(p.id)
     return {
         "revisions": [
             {
@@ -317,8 +292,8 @@ def list_sources(project_id: str, ctx: CtxDep, db: DbDep) -> dict:
 def file_tree(project_id: str, ctx: CtxDep, db: DbDep, revision_id: str = "") -> dict:
     p = _get_project(db, ctx, project_id)
     rev = _target_revision(db, p, revision_id)
-    files = db.query(SourceFile).filter(SourceFile.revision_id == rev.id).all()
-    findings = db.query(Finding).filter(Finding.revision_id == rev.id, Finding.status == "open").all()
+    files = source_store.get_files(rev.id)
+    findings = db.query(Finding).filter(Finding.repository_id == p.id, Finding.status == "open").all()
     return {
         "revisionId": rev.id,
         "revisionDigest": short_digest(rev.digest),
@@ -330,20 +305,19 @@ def file_tree(project_id: str, ctx: CtxDep, db: DbDep, revision_id: str = "") ->
 def file_content(project_id: str, ctx: CtxDep, db: DbDep, path: str, revision_id: str = "") -> dict:
     p = _get_project(db, ctx, project_id)
     rev = _target_revision(db, p, revision_id)
-    # path is matched against stored normalized paths only; no filesystem access happens.
-    src = db.query(SourceFile).filter(SourceFile.revision_id == rev.id, SourceFile.path == path).first()
+    src = source_store.get_file(rev.id, path)
     if src is None:
         raise api_error(404, "file_not_found", "File not found in this revision.")
     if src.is_dir or src.content is None:
         raise api_error(422, "not_a_text_file", "Directory or non-text file.")
-    findings = db.query(Finding).filter(Finding.revision_id == rev.id, Finding.file_path == path).all()
+    findings = db.query(Finding).filter(Finding.repository_id == p.id, Finding.affected_file == path).all()
     lines = src.content.split("\n")
     line_dtos = [
         {"lineNumber": i + 1, "content": line[:500], "type": "neutral", "highlight": False}
         for i, line in enumerate(lines)
     ]
     for f in findings:
-        for n in range(max(1, f.line_start), min(len(lines), f.line_end) + 1):
+        for n in range(max(1, f.start_line or 1), min(len(lines), f.end_line or (f.start_line or 1)) + 1):
             if 0 < n <= len(line_dtos):
                 line_dtos[n - 1]["highlight"] = True
     return {
@@ -354,12 +328,12 @@ def file_content(project_id: str, ctx: CtxDep, db: DbDep, path: str, revision_id
         "findings": [
             {
                 "id": f.display_id,
-                "internalId": f.id,
+                "internalId": str(f.id),
                 "title": f.title,
                 "severity": f.severity,
-                "lineStart": f.line_start,
-                "lineEnd": f.line_end,
-                "cwe": f.cwe,
+                "lineStart": f.start_line or 1,
+                "lineEnd": f.end_line or (f.start_line or 1),
+                "cwe": f.cwe_id or "",
                 "cvssScore": f.cvss_score,
                 "description": f.description,
             }
@@ -370,16 +344,11 @@ def file_content(project_id: str, ctx: CtxDep, db: DbDep, path: str, revision_id
 
 def _target_revision(db: Session, p: Project, revision_id: str) -> SourceRevision:
     if revision_id:
-        rev = db.get(SourceRevision, revision_id)
-        if rev is None or rev.project_id != p.id:
+        rev = source_store.get_revision(revision_id)
+        if rev is None or str(rev.project_id) != str(p.id):
             raise api_error(404, "revision_not_found", "Revision not found for this project.")
         return rev
-    rev = (
-        db.query(SourceRevision)
-        .filter(SourceRevision.project_id == p.id)
-        .order_by(SourceRevision.created_at.desc())
-        .first()
-    )
+    rev = source_store.get_latest_revision(p.id)
     if rev is None:
         raise api_error(409, "no_source_imported", "Import a source archive before browsing files.")
     return rev

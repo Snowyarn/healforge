@@ -40,9 +40,9 @@ def _make_engine(url: str):
 
         return engine
     # PostgreSQL (deployment) — psycopg3 driver string expected.
-    # Isolated schema for backend models, keeping public schema intact
+    # Uses public schema by default to connect directly to existing Supabase tables.
     connect_args = {}
-    if settings.database_schema:
+    if settings.database_schema and settings.database_schema != "public":
         connect_args["options"] = f"-c search_path={settings.database_schema}"
     return create_engine(
         url,
@@ -63,6 +63,13 @@ def get_db() -> Iterator[Session]:
     try:
         yield db
     finally:
+        try:
+            if not str(db.bind.url).startswith("sqlite"):
+                from sqlalchemy import text
+                db.execute(text("RESET role"))
+                db.execute(text("SELECT set_config('request.jwt.claims', '', false)"))
+        except Exception:
+            pass
         db.close()
 
 

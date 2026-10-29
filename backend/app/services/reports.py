@@ -68,7 +68,11 @@ def generate_report(
     project = db.get(Project, project_id) if project_id else None
     scan = db.get(ScanJob, scan_id) if scan_id else None
     summary_data = _findings_summary(db, workspace_id, project_id, scan_id)
-    revisions = db.query(SourceRevision).filter(SourceRevision.project_id == project.id).count() if project else 0
+    try:
+        from . import source_store
+        revisions = len(source_store.list_revisions(project.id)) if project else 0
+    except Exception:
+        revisions = 0
     scans_count = (
         db.query(ScanJob).filter(ScanJob.workspace_id == workspace_id).count()
         if project_id is None
@@ -149,7 +153,7 @@ def generate_report(
     report = Report(
         id=new_id("rpt"),
         workspace_id=workspace_id,
-        report_type=report_type,
+        report_type=report_type.replace("-", "_"),
         title=title[:250],
         project_id=project_id,
         scan_id=scan_id,

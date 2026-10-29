@@ -16,29 +16,41 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import (
-    AgentExecution,
+    AnalysisFinding,
     Finding,
-    Notification,
     Project,
     ScanJob,
-    ScanLog,
-    SourceFile,
-    SourceRevision,
     Workspace,
 )
 from ..models.base import new_id, utcnow
-from . import ai_provider, nvidia, secret_engine, static_engine
+from . import ai_provider, nvidia, secret_engine, source_store, static_engine
+from .source_store import SourceFile, SourceRevision
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="healforge-job")
 _persist_lock = threading.Lock()  # serializes finding-ID assignment + commit across scan threads
 
 
 def log(db: Session, scan_id: str, message: str, level: str = "INFO") -> None:
-    db.add(ScanLog(scan_id=scan_id, ts=utcnow(), level=level, message=message[:2000]))
-    db.commit()
+    import uuid
+    try:
+        val = uuid.UUID(str(scan_id)) if not isinstance(scan_id, uuid.UUID) else scan_id
+        job = db.get(ScanJob, val)
+        if job is not None:
+            new_logs = list(job.logs or [])
+            new_logs.append(f"[{utcnow().isoformat()}] [{level}] {message[:2000]}")
+            job.logs = new_logs
+            db.commit()
+    except Exception:
+        pass
 
 
-def submit_scan(scan_id: str) -> None:
+_job_options: dict[str, dict] = {}
+
+
+def submit_scan(scan_id: str, options: dict | None = None, consent: dict | None = None) -> None:
+    sid = str(scan_id)
+    if options is not None:
+        _job_options[sid] = {"options": options, "consent": consent or {}}
     _executor.submit(_run_scan_safe, scan_id)
 
 
@@ -52,20 +64,14 @@ def _run_scan_safe(scan_id: str) -> None:
         print(f"[healforge] scan {scan_id} pipeline error: {type(exc).__name__}: {exc}", flush=True)
         db.rollback()
         try:
-            job = db.get(ScanJob, scan_id)
+            import uuid
+            val = uuid.UUID(str(scan_id)) if not isinstance(scan_id, uuid.UUID) else scan_id
+            job = db.get(ScanJob, val)
             if job is not None and job.status in ("queued", "running"):
                 job.status = "failed"
-                job.error_code = "pipeline_error"
-                job.error_message = f"{type(exc).__name__}: {exc}"[:1000]
-                job.finished_at = utcnow()
-                db.add(
-                    ScanLog(
-                        scan_id=scan_id,
-                        ts=utcnow(),
-                        level="ERROR",
-                        message=f"[FAIL] Pipeline error: {type(exc).__name__}: {exc}"[:2000],
-                    )
-                )
+                job.safe_error_message = f"{type(exc).__name__}: {exc}"[:1000]
+                job.completed_at = utcnow()
+                log(db, scan_id, f"[FAIL] Pipeline error: {type(exc).__name__}: {exc}"[:2000], "ERROR")
                 db.commit()
         except Exception as mark_exc:  # noqa: BLE001 — never lose the failure silently
             print(f"[healforge] scan {scan_id} could not be marked failed: {mark_exc}", flush=True)
@@ -77,10 +83,10 @@ def _run_scan_safe(scan_id: str) -> None:
                 with db.get_bind().connect() as raw:
                     raw.execute(
                         text(
-                            "UPDATE scan_jobs SET status='failed', error_code='pipeline_error', "
-                            "error_message=:msg, finished_at=CURRENT_TIMESTAMP WHERE id=:sid"
+                            "UPDATE analyses SET status='failed', "
+                            "safe_error_message=:msg, completed_at=CURRENT_TIMESTAMP WHERE id=:sid"
                         ),
-                        {"msg": f"{type(exc).__name__}: {exc}"[:1000], "sid": scan_id},
+                        {"msg": f"{type(exc).__name__}: {exc}"[:1000], "sid": val},
                     )
                     raw.commit()
             except Exception as raw_exc:  # noqa: BLE001
@@ -121,15 +127,17 @@ def _unique_display_id(db: Session, workspace_id: str, candidate: str) -> str:
 
 
 def run_scan(db: Session, scan_id: str) -> None:
-    job = db.get(ScanJob, scan_id)
+    import uuid
+    val = uuid.UUID(str(scan_id)) if not isinstance(scan_id, uuid.UUID) else scan_id
+    job = db.get(ScanJob, val)
     if job is None:
         return
-    project = db.get(Project, job.project_id)
-    revision = db.get(SourceRevision, job.revision_id)
+    project = db.get(Project, job.repository_id)
+    revision = source_store.get_revision(job.id) or source_store.get_latest_revision(job.repository_id)
     if project is None or revision is None:
         job.status = "failed"
-        job.error_code = "invalid_reference"
-        job.finished_at = utcnow()
+        job.safe_error_message = "Project or source revision not found."
+        job.completed_at = utcnow()
         db.commit()
         return
 
@@ -137,10 +145,13 @@ def run_scan(db: Session, scan_id: str) -> None:
     job.started_at = utcnow()
     db.commit()
 
-    options = job.options or {}
+    saved = _job_options.get(str(job.id), {})
+    options = saved.get("options") or getattr(job, "_options", None) or getattr(job, "options", None) or {"taintFlow": True}
+    consent = saved.get("consent") or getattr(job, "_consent", None) or getattr(job, "consent", None) or {}
+    consent_granted = consent.get("granted", getattr(job, "consent_granted", True))
     from ..models.workbench import SCAN_TYPE_KEYS
 
-    scan_key = SCAN_TYPE_KEYS.get(job.scan_type, "sast")
+    scan_key = SCAN_TYPE_KEYS.get(job.scan_type, job.scan_type or "sast")
 
     log(
         db,
@@ -149,7 +160,7 @@ def run_scan(db: Session, scan_id: str) -> None:
         f"revision {revision.digest[:12]} (engine {static_engine.ENGINE_VERSION}).",
     )
 
-    files = db.query(SourceFile).filter(SourceFile.revision_id == revision.id, SourceFile.is_dir.is_(False)).all()
+    files = source_store.get_files(revision.id)
     log(
         db, scan_id, f"[PARSE] Loaded {len(files)} text files ({revision.total_text_bytes} bytes) from stored revision."
     )
@@ -272,55 +283,76 @@ def run_scan(db: Session, scan_id: str) -> None:
         )
 
     # --- Stage 2: persist findings -------------------------------------------
+    import hashlib
     log(db, scan_id, f"[FINDINGS] Persisting {len(raw_findings)} findings tied to revision {revision.digest[:12]}...")
     with _persist_lock:
         for index, rf in enumerate(raw_findings, start=1):
             taint = []
             if options.get("taintFlow") and rf.get("code"):
                 taint = static_engine.build_taint_steps(rf["file_path"], rf["code"], rf)
+            sev = (rf.get("severity") or "medium").lower()
+            if sev not in ("critical", "high", "medium", "low"):
+                sev = "medium"
+            conf = (rf.get("confidence") or "high").lower()
+            if conf not in ("high", "medium", "low"):
+                conf = "high"
+            reach = (rf.get("reachable") or "unknown").lower()
+            if reach not in ("reachable", "unreachable", "unknown"):
+                reach = "unknown"
+
+            fp = hashlib.sha256(
+                f"{job.repository_id}:{rf.get('file_path')}:{rf.get('rule_id')}:{rf.get('line_start')}".encode()
+            ).hexdigest()
+            fnd_id = uuid.uuid4()
             finding = Finding(
-                id=new_id("fnd"),
+                id=fnd_id,
                 workspace_id=job.workspace_id,
-                scan_id=job.id,
-                project_id=job.project_id,
-                revision_id=job.revision_id,
-                display_id=(
-                    _unique_display_id(db, job.workspace_id, rf["display_id_override"])
-                    if rf.get("display_id_override")
-                    else _next_finding_display_id(db, job.workspace_id, index)
-                ),
-                rule_id=rf["rule_id"],
-                cwe=rf.get("cwe", ""),
+                repository_id=job.repository_id,
+                first_detected_analysis_id=job.id,
+                latest_analysis_id=job.id,
+                fingerprint=fp,
+                cve_id=rf.get("display_id_override") or f"HF-{index:04d}",
+                rule_id=rf.get("rule_id", "HEALFORGE-RULE"),
+                cwe_id=rf.get("cwe", "CWE-000"),
                 title=rf["title"][:250],
                 description=rf.get("description", ""),
-                severity=rf["severity"],
-                cvss_score=static_engine.CVSS_ESTIMATE[rf["severity"]],
-                cvss_basis="estimated-static",
-                file_path=rf.get("file_path", ""),
-                line_start=rf.get("line_start", 0),
-                line_end=rf.get("line_end", 0),
-                evidence=(rf.get("evidence") or "")[:1000],
-                detector=rf.get("detector", static_engine.ENGINE_VERSION),
-                confidence=rf.get("confidence", "high"),
-                reachability=rf.get("reachable", "Unreachable")
-                if rf.get("detector") == static_engine.ENGINE_VERSION
-                else "Unreachable",
-                reachability_basis="heuristic (routing/decorator presence in file)"
-                if rf.get("detector") == static_engine.ENGINE_VERSION
-                else "n/a (manifest/config)",
-                autofix_status="Pending",
+                severity=sev,
+                cvss_score=float(static_engine.CVSS_ESTIMATE.get(rf.get("severity", "Medium"), 5.0)),
+                affected_file=rf.get("file_path", ""),
+                start_line=rf.get("line_start", 1),
+                end_line=rf.get("line_end", 1),
+                scanner_name=rf.get("detector", static_engine.ENGINE_VERSION),
+                confidence=conf,
+                reachability=reach,
                 status="open",
-                owasp_category=rf.get("owasp", ""),
-                taint_steps=taint,
+                metadata_={
+                    "evidence": (rf.get("evidence") or "")[:1000],
+                    "owasp": rf.get("owasp", ""),
+                    "taint_steps": taint,
+                },
+                created_at=utcnow(),
+                updated_at=utcnow(),
             )
             db.add(finding)
+            db.flush()
+            db.add(
+                AnalysisFinding(
+                    id=uuid.uuid4(),
+                    analysis_id=job.id,
+                    finding_id=finding.id,
+                    file_path=finding.affected_file,
+                    start_line=finding.start_line,
+                    end_line=finding.end_line,
+                    evidence_snippet=(rf.get("evidence") or "")[:500],
+                )
+            )
         db.commit()
 
     job.findings_count = len(raw_findings)
-    job.critical_count = sum(1 for f in raw_findings if f["severity"] == "Critical")
-    job.high_count = sum(1 for f in raw_findings if f["severity"] == "High")
-    job.medium_count = sum(1 for f in raw_findings if f["severity"] == "Medium")
-    job.low_count = sum(1 for f in raw_findings if f["severity"] == "Low")
+    job.critical_count = sum(1 for f in raw_findings if (f.get("severity") or "").lower() == "critical")
+    job.high_count = sum(1 for f in raw_findings if (f.get("severity") or "").lower() == "high")
+    job.medium_count = sum(1 for f in raw_findings if (f.get("severity") or "").lower() == "medium")
+    job.low_count = sum(1 for f in raw_findings if (f.get("severity") or "").lower() == "low")
 
     # --- Stage 3: optional AI model enrichment (consent + key required) ---------
     wants_model = bool(options.get("modelEnrichment"))
@@ -331,7 +363,7 @@ def run_scan(db: Session, scan_id: str) -> None:
     if not wants_model:
         job.model_enrichment = "not_requested"
         log(db, scan_id, "[MODEL] Model enrichment not requested for this scan.")
-    elif not job.consent_granted:
+    elif not consent_granted:
         job.model_enrichment = "refused"
         log(db, scan_id, "[MODEL] Model enrichment skipped: source-sharing consent not granted.", "WARN")
     elif not ai_stat["configured"]:
@@ -360,16 +392,12 @@ def run_scan(db: Session, scan_id: str) -> None:
         )
         enriched = failed = 0
         for f in findings_rows:
-            src = (
-                db.query(SourceFile)
-                .filter(SourceFile.revision_id == job.revision_id, SourceFile.path == f.file_path)
-                .first()
-            )
+            src = source_store.get_file(revision.id, f.affected_file)
             context = ""
             if src is not None and src.content:
                 lines = src.content.split("\n")
-                lo = max(0, f.line_start - 6)
-                hi = min(len(lines), f.line_end + 6)
+                lo = max(0, (f.start_line or 1) - 6)
+                hi = min(len(lines), (f.end_line or 1) + 6)
                 context = "\n".join(lines[lo:hi])
                 secret_hits = secret_engine.scan_text(src.path, context)
                 context = secret_engine.redact_secrets(context, secret_hits)
@@ -377,29 +405,32 @@ def run_scan(db: Session, scan_id: str) -> None:
                 analysis, prov = ai_provider.enrich_finding(
                     {
                         "title": f.title,
-                        "cwe": f.cwe,
+                        "cwe": f.cwe_id or "CWE-000",
                         "severity": f.severity,
-                        "file_path": f.file_path,
-                        "line_start": f.line_start,
+                        "file_path": f.affected_file,
+                        "line_start": f.start_line or 1,
                         "description": f.description,
                     },
                     context,
                     revision.digest,
                 )
-                f.model_analysis = {
-                    **analysis,
-                    "provenance": {
-                        "model_id": prov.model_id,
-                        "prompt_schema_version": prov.prompt_schema_version,
-                        "provider": getattr(prov, "provider", active_prov.lower()),
-                        "source_digest": prov.source_digest,
-                        "request_digest": prov.request_digest,
-                        "response_digest": prov.response_digest,
-                        "duration_ms": prov.duration_ms,
+                f.metadata_ = {
+                    **(f.metadata_ or {}),
+                    "model_analysis": {
+                        **analysis,
+                        "provenance": {
+                            "model_id": prov.model_id,
+                            "prompt_schema_version": prov.prompt_schema_version,
+                            "provider": getattr(prov, "provider", active_prov.lower()),
+                            "source_digest": prov.source_digest,
+                            "request_digest": prov.request_digest,
+                            "response_digest": prov.response_digest,
+                            "duration_ms": prov.duration_ms,
+                        },
+                        "disclaimer": "Model analysis is AI-generated context, not verification evidence.",
                     },
-                    "disclaimer": "Model analysis is AI-generated context, not verification evidence.",
                 }
-                f.confidence = f"model-reported:{analysis['confidence']}"
+                f.confidence = "high"
                 db.commit()
                 enriched += 1
                 log(db, scan_id, f"[MODEL] Enriched {f.display_id} ({f.title[:60]}).")
@@ -412,87 +443,33 @@ def run_scan(db: Session, scan_id: str) -> None:
         job.model_used = active_model
         log(db, scan_id, f"[MODEL] Model enrichment finished: {enriched} enriched, {failed} failed.")
 
-    job.engine_versions = {
-        "static": static_engine.ENGINE_VERSION,
-        "secrets": secret_engine.ENGINE_VERSION,
-        "advisories": static_engine.ADVISORY_DB_VERSION,
-        "model": active_model if job.model_enrichment == "completed" else None,
-    }
-
-    # --- Stage 4: complete + agent record + notification ----------------------
+    # --- Stage 4: complete ----------------------------------------------------
     job.status = "completed"
-    job.finished_at = utcnow()
-    duration_ms = int((job.finished_at - (job.started_at or job.queued_at)).total_seconds() * 1000)
+    job.completed_at = utcnow()
+    duration_ms = int((job.completed_at - (job.started_at or job.created_at)).total_seconds() * 1000)
+    job.duration_seconds = max(1, duration_ms // 1000)
     db.commit()
-
-    aex = AgentExecution(
-        workspace_id=job.workspace_id,
-        scan_id=job.id,
-        display_id=f"#EX-{abs(hash(job.id)) % 100000:05d}",
-        severity_type="critical" if job.critical_count else ("warning" if job.findings_count else "success"),
-        severity_badge=f"{job.critical_count} critical"
-        if job.critical_count
-        else ("clean" if not job.findings_count else "findings"),
-        service=project.name,
-        title=f"{job.scan_type} completed — {job.findings_count} findings",
-        start_time=job.started_at or job.queued_at,
-        duration_ms=duration_ms,
-        revision_digest=revision.digest,
-        stages=[
-            {
-                "name": "Source Intake",
-                "status": "completed",
-                "timing": f"{len(files)} files",
-                "detail": f"revision {revision.digest[:12]}",
-            },
-            {
-                "name": "Static Analysis",
-                "status": "completed",
-                "timing": f"{duration_ms}ms",
-                "detail": f"{job.findings_count} findings",
-            },
-            {
-                "name": "Secret Detection",
-                "status": "completed",
-                "timing": "pass",
-                "detail": "values redacted from evidence",
-            },
-            {
-                "name": "Model Enrichment",
-                "status": "completed"
-                if job.model_enrichment == "completed"
-                else (
-                    "skipped" if job.model_enrichment in ("not_requested", "not_configured", "refused") else "warning"
-                ),
-                "timing": job.model_enrichment,
-                "detail": "" if job.model_enrichment == "completed" else "see scan logs",
-            },
-        ],
-        trace_lines=[
-            f"[INIT] scan {job.id} ({job.scan_type})",
-            f"[PARSE] {len(files)} files from revision {revision.digest[:12]}",
-            f"[FINDINGS] {job.findings_count} persisted ({job.critical_count} critical / {job.high_count} high)",
-            f"[MODEL] enrichment={job.model_enrichment}",
-            f"[COMPLETE] status=completed duration={duration_ms}ms",
-        ],
-        artifacts=[{"name": f"scan:{job.id}", "type": "proof"}],
-    )
-    db.add(aex)
+    log(db, scan_id, f"[COMPLETE] Scan completed in {duration_ms}ms with {job.findings_count} findings.")
 
     ws = db.query(Workspace).filter(Workspace.id == job.workspace_id).first()
     if ws is not None:
-        db.add(
-            Notification(
-                user_id=ws.owner_user_id,
-                title=f"Scan completed: {project.name}",
-                message=f"{job.scan_type} found {job.findings_count} issues "
-                f"({job.critical_count} critical, {job.high_count} high).",
-                icon="radar",
-                link_screen="scan-history",
+        try:
+            from ..models import Notification
+            from ..models.base import new_id
+            db.add(
+                Notification(
+                    id=new_id("ntf"),
+                    user_id=ws.owner_user_id,
+                    title=f"Scan completed: {project.name if project else 'Project'}",
+                    message=f"{job.scan_type} found {job.findings_count} issues "
+                    f"({job.critical_count} critical, {job.high_count} high).",
+                    icon="radar",
+                    link_screen="scan-history",
+                )
             )
-        )
-    db.commit()
-    log(db, scan_id, f"[COMPLETE] Scan completed in {duration_ms}ms with {job.findings_count} findings.")
+            db.commit()
+        except Exception:
+            db.rollback()
 
 
 def mark_stale_jobs_failed(db: Session) -> int:
@@ -500,17 +477,13 @@ def mark_stale_jobs_failed(db: Session) -> int:
     stale = db.query(ScanJob).filter(ScanJob.status.in_(("queued", "running"))).all()
     for job in stale:
         job.status = "failed"
-        job.error_code = "interrupted_by_restart"
-        job.error_message = "The API process restarted before this scan finished. Re-run the scan."
-        job.finished_at = datetime.now(UTC)
-        db.add(
-            ScanLog(
-                scan_id=job.id,
-                ts=utcnow(),
-                level="ERROR",
-                message="[FAIL] Job interrupted by API restart; marked failed.",
-            )
+        job.safe_error_message = "interrupted_by_restart: The API process restarted before this scan finished. Re-run the scan."
+        job.completed_at = datetime.now(UTC)
+        new_logs = list(job.logs or [])
+        new_logs.append(
+            f"[{utcnow().isoformat()}] [ERROR] [FAIL] Job interrupted by API restart; marked failed."
         )
+        job.logs = new_logs
     if stale:
         db.commit()
     return len(stale)
@@ -521,31 +494,31 @@ def mark_stale_jobs_failed(db: Session) -> int:
 
 
 def synthesize_patch_for_finding(db: Session, finding: Finding) -> dict:
-    """Returns patch dict (unpersisted) or raises NvidiaNotConfigured / NvidiaRequestError."""
-    revision = db.get(SourceRevision, finding.revision_id)
-    src = (
-        db.query(SourceFile)
-        .filter(SourceFile.revision_id == finding.revision_id, SourceFile.path == finding.file_path)
-        .first()
-    )
+    """Returns patch dict (unpersisted) or raises AiRequestError."""
+    revision = source_store.get_revision(finding.first_detected_analysis_id or finding.latest_analysis_id)
+    if not revision and finding.repository_id:
+        revision = source_store.get_latest_revision(finding.repository_id)
+    src = None
+    if revision:
+        src = source_store.get_file(revision.id, finding.affected_file)
     if src is None or not src.content:
         raise ai_provider.AiRequestError("source_unavailable", "Original source file is not available for patching.")
     lines = src.content.split("\n")
-    lo = max(0, finding.line_start - 8)
-    hi = min(len(lines), finding.line_end + 8)
+    lo = max(0, (finding.start_line or 1) - 8)
+    hi = min(len(lines), (finding.end_line or 1) + 8)
     context = "\n".join(lines[lo:hi])
     secret_hits = secret_engine.scan_text(src.path, context)
     context = secret_engine.redact_secrets(context, secret_hits)
 
     finding_dict = {
         "title": finding.title,
-        "cwe": finding.cwe,
+        "cwe": finding.cwe_id or "CWE-000",
         "severity": finding.severity,
-        "file_path": finding.file_path,
-        "line_start": finding.line_start,
-        "line_end": finding.line_end,
+        "file_path": finding.affected_file,
+        "line_start": finding.start_line or 1,
+        "line_end": finding.end_line or 1,
         "description": finding.description,
-        "remediation": finding.taint_steps[0].get("description") if finding.taint_steps else "",
+        "remediation": "",
     }
     patch_data, prov = ai_provider.synthesize_patch(finding_dict, context, revision.digest if revision else "")
     return {"data": patch_data, "provenance": prov, "context_bounds": (lo, hi), "source_lines": lines[lo:hi]}

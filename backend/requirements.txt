@@ -9,6 +9,7 @@ python-multipart==0.0.24
 # identical. Required when DATABASE_URL is postgresql+psycopg:// (deployment);
 # harmless for SQLite local dev (import happens lazily per-connection).
 psycopg[binary]==3.2.10
+pyjwt==2.15.1
 pytest==9.0.2
 httpx==0.28.1
 ruff==0.14.5

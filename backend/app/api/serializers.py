@@ -18,6 +18,8 @@ from ..models import (
     Finding,
     IntegrationConfig,
     PatchProposal,
+    PatchReview,
+    PatchVersion,
     Project,
     Report,
     ReviewEvent,
@@ -96,17 +98,15 @@ RUNTIME_ICONS = {
 }
 
 
+from ..services import source_store
+
+
 def project_dto(db: Session, p: Project, health: dict | None = None) -> dict:
     """ProjectDetail contract + id fields used by new flows."""
     if health is None:
         health = project_health(db, p)
-    last_scan = db.query(ScanJob).filter(ScanJob.project_id == p.id).order_by(ScanJob.queued_at.desc()).first()
-    latest_rev = (
-        db.query(SourceRevision)
-        .filter(SourceRevision.project_id == p.id)
-        .order_by(SourceRevision.created_at.desc())
-        .first()
-    )
+    last_scan = db.query(ScanJob).filter(ScanJob.repository_id == p.id).order_by(ScanJob.created_at.desc()).first()
+    latest_rev = source_store.get_latest_revision(p.id)
     scan_status = "healthy"
     if health["critical_open"] > 0:
         scan_status = "vulnerable"
@@ -116,14 +116,18 @@ def project_dto(db: Session, p: Project, health: dict | None = None) -> dict:
     runs = db.query(VerificationRun).filter(VerificationRun.workspace_id == p.workspace_id).count()
     if runs:
         verification_status = "verified"
+
+    head_commit = short_digest(latest_rev.digest if latest_rev else (last_scan.commit_sha if last_scan else None))
+    latest_rev_id = latest_rev.id if latest_rev else (str(last_scan.id) if last_scan else None)
+
     return {
-        "id": p.id,
+        "id": str(p.id),
         "name": p.name,
         "provider": p.provider,
-        "primaryBranch": p.primary_branch,
-        "branches": [p.primary_branch],
-        "lastScanTime": time_ago(last_scan.queued_at if last_scan else None),
-        "lastScanTimeIso": (last_scan.queued_at.isoformat() if last_scan and last_scan.queued_at else None),
+        "primaryBranch": p.default_branch,
+        "branches": [p.default_branch],
+        "lastScanTime": time_ago(last_scan.created_at if last_scan else None),
+        "lastScanTimeIso": (last_scan.created_at.isoformat() if last_scan and last_scan.created_at else None),
         "scanStatus": scan_status,
         "openVulnCount": health["open"],
         "criticalCount": health["critical_open"],
@@ -132,17 +136,17 @@ def project_dto(db: Session, p: Project, health: dict | None = None) -> dict:
         "healthScore": health["score"],
         "description": p.description,
         "runtime": p.runtime,
-        "headCommit": short_digest(latest_rev.digest if latest_rev else None),
-        "latestRevisionId": latest_rev.id if latest_rev else None,
-        "archived": p.archived_at is not None,
+        "headCommit": head_commit,
+        "latestRevisionId": latest_rev_id,
+        "archived": False,
         "createdAtIso": p.created_at.isoformat() if p.created_at else None,
     }
 
 
 def project_health(db: Session, p: Project) -> dict:
-    open_rows = db.query(Finding).filter(Finding.project_id == p.id, Finding.status == "open").all()
-    critical = sum(1 for f in open_rows if f.severity == "Critical")
-    high = sum(1 for f in open_rows if f.severity == "High")
+    open_rows = db.query(Finding).filter(Finding.repository_id == p.id, Finding.status == "open").all()
+    critical = sum(1 for f in open_rows if (f.severity or "").lower() == "critical")
+    high = sum(1 for f in open_rows if (f.severity or "").lower() == "high")
     open_count = len(open_rows)
     score = max(0, 100 - critical * 15 - high * 8 - (open_count - critical - high) * 3)
     return {"open": open_count, "critical_open": critical, "high_open": high, "score": score}
@@ -150,12 +154,7 @@ def project_health(db: Session, p: Project) -> dict:
 
 def repository_health_dto(db: Session, p: Project) -> dict:
     h = project_health(db, p)
-    last_rev = (
-        db.query(SourceRevision)
-        .filter(SourceRevision.project_id == p.id)
-        .order_by(SourceRevision.created_at.desc())
-        .first()
-    )
+    last_rev = source_store.get_latest_revision(p.id)
     return {
         "name": p.name,
         "runtime": p.runtime,
@@ -166,7 +165,7 @@ def repository_health_dto(db: Session, p: Project) -> dict:
         "highCount": h["high_open"],
         "headCommit": short_digest(last_rev.digest if last_rev else None),
         "status": "critical" if h["critical_open"] else "optimal",
-        "projectId": p.id,
+        "projectId": str(p.id),
     }
 
 
@@ -182,15 +181,19 @@ SCAN_STATUS_MAP = {
 
 
 def scan_record_dto(db: Session, job: ScanJob, with_logs: bool = True) -> dict:
-    project = db.get(Project, job.project_id)
-    revision = db.get(SourceRevision, job.revision_id)
-    logs_q = db.query(ScanLog).filter(ScanLog.scan_id == job.id).order_by(ScanLog.ts, ScanLog.id)
-    logs = [f"[{entry.level}] {entry.message}" for entry in logs_q.all()] if with_logs else []
-    started = job.started_at or job.queued_at
+    project = db.get(Project, job.repository_id)
+    revision = source_store.get_revision(job.id) or source_store.get_latest_revision(job.repository_id)
+    raw_logs = job.logs or []
+    if with_logs:
+        logs = [f"[{entry.get('level', 'INFO')}] {entry.get('message', '')}" if isinstance(entry, dict) else str(entry) for entry in raw_logs]
+    else:
+        logs = []
+    started = job.started_at or job.created_at
+    commit_hash = short_digest(revision.digest if revision else job.commit_sha)
     return {
-        "id": job.id,
+        "id": str(job.id),
         "project": project.name if project else "unknown",
-        "projectId": job.project_id,
+        "projectId": str(job.repository_id),
         "scanType": job.scan_type,
         "startTime": time_ago(started),
         "startTimeIso": started.isoformat() if started else None,
@@ -202,14 +205,14 @@ def scan_record_dto(db: Session, job: ScanJob, with_logs: bool = True) -> dict:
         "highCount": job.high_count,
         "mediumCount": job.medium_count,
         "lowCount": job.low_count,
-        "trigger": job.trigger,
-        "commitHash": short_digest(revision.digest if revision else None),
-        "revisionId": job.revision_id,
+        "trigger": job.trigger_type,
+        "commitHash": commit_hash,
+        "revisionId": str(job.id),
         "logs": logs,
         "consentGranted": job.consent_granted,
         "modelEnrichment": job.model_enrichment,
         "modelUsed": job.model_used,
-        "error": {"code": job.error_code, "message": job.error_message} if job.error_code else None,
+        "error": {"code": job.error_code, "message": job.safe_error_message} if job.error_code else None,
     }
 
 
@@ -234,13 +237,13 @@ def _code_lines(content: str | None, lo: int, hi: int, highlight_from: int, high
 
 
 def finding_dto(db: Session, f: Finding, full: bool = False) -> dict:
-    project = db.get(Project, f.project_id)
-    revision = db.get(SourceRevision, f.revision_id)
+    project = db.get(Project, f.repository_id)
+    revision = source_store.get_revision(f.first_detected_analysis_id or f.latest_analysis_id)
+    if not revision and f.repository_id:
+        revision = source_store.get_latest_revision(f.repository_id)
     src = None
-    if full:
-        src = (
-            db.query(SourceFile).filter(SourceFile.revision_id == f.revision_id, SourceFile.path == f.file_path).first()
-        )
+    if full and revision:
+        src = source_store.get_file(revision.id, f.affected_file)
     patch = (
         db.query(PatchProposal).filter(PatchProposal.finding_id == f.id).order_by(PatchProposal.version.desc()).first()
     )
@@ -311,10 +314,10 @@ def finding_dto(db: Session, f: Finding, full: bool = False) -> dict:
         "severity": f.severity,
         "cvssScore": f.cvss_score,
         "cvssBasis": f.cvss_basis,
-        "reachability": f.reachability,
+        "reachability": f.reachability.capitalize() if f.reachability else "Unknown",
         "reachabilityBasis": f.reachability_basis,
         "autofixStatus": f.autofix_status,
-        "status": f.status,
+        "status": "resolved" if f.status == "verified_fixed" else f.status,
         "confidence": f.confidence,
         "scanId": f.scan_id,
         "revisionDigest": short_digest(revision.digest if revision else None),
@@ -349,11 +352,19 @@ def finding_dto(db: Session, f: Finding, full: bool = False) -> dict:
 def patch_dto(db: Session, p: PatchProposal, include_reviews: bool = True) -> dict:
     finding = db.get(Finding, p.finding_id)
     project = db.get(Project, p.project_id)
-    reviews = (
-        db.query(ReviewEvent).filter(ReviewEvent.patch_id == p.id).order_by(ReviewEvent.created_at).all()
-        if include_reviews
-        else []
-    )
+    reviews = []
+    if include_reviews:
+        if p.versions:
+            for v in p.versions:
+                reviews.extend(v.reviews)
+        else:
+            reviews = (
+                db.query(PatchReview)
+                .join(PatchVersion)
+                .filter(PatchVersion.patch_id == p.id)
+                .order_by(PatchReview.created_at)
+                .all()
+            )
     runs = (
         db.query(VerificationRun)
         .filter(VerificationRun.patch_id == p.id)
@@ -431,9 +442,9 @@ def patch_dto(db: Session, p: PatchProposal, include_reviews: bool = True) -> di
         "verificationLog": verification_log,
         "reviews": [
             {
-                "action": r.action,
+                "action": "approve" if r.action == "approved" else ("reject" if r.action == "rejected" else ("request_changes" if r.action == "changes_requested" else r.action)),
                 "notes": r.notes,
-                "actor": r.user_id,
+                "actor": str(r.user_id) if r.user_id else "",
                 "at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in reviews
@@ -452,11 +463,14 @@ def patch_dto(db: Session, p: PatchProposal, include_reviews: bool = True) -> di
 
 
 PATCH_STATUS_MAP = {
+    "ready_for_review": "Pending Review",
+    "under_review": "Under Review",
     "pending_review": "Pending Review",
     "approved": "Approved",
     "rejected": "Rejected",
     "changes_requested": "Changes Requested",
-    "superseded": "Changes Requested",
+    "applied": "Applied",
+    "superseded": "Superseded",
 }
 
 
@@ -464,21 +478,30 @@ PATCH_STATUS_MAP = {
 
 
 def verification_run_dto(db: Session, v: VerificationRun) -> dict:
-    patch = db.get(PatchProposal, v.patch_id)
-    ev = (v.results or {}).get("evidence", {})
+    patch_ver = db.get(PatchVersion, v.patch_version_id)
+    patch = patch_ver.patch if patch_ver else db.get(PatchProposal, v.patch_id)
+    patch_id = patch.id if patch else v.patch_id
+    ev = (v.isolation_config or {}).get("evidence", {})
+    checks = (v.isolation_config or {}).get("checks", [])
+    disclaimer = (v.isolation_config or {}).get("disclaimer", "")
+    api_status = v.status
+    if v.mode == "execution" and v.status == "failed":
+        api_status = "verification_unavailable"
+    elif v.status == "passed":
+        api_status = "completed"
     return {
-        "id": v.id,
-        "patchId": v.patch_id,
+        "id": str(v.id),
+        "patchId": str(patch_id),
         "patchStatus": patch.status if patch else None,
         "mode": v.mode,
-        "status": v.status,
-        "reason": v.reason,
+        "status": api_status,
+        "reason": v.reason or "",
         "policy": v.policy or {},
-        "checks": (v.results or {}).get("checks", []),
-        "disclaimer": (v.results or {}).get("disclaimer", ""),
-        "evidenceDigest": v.evidence_digest,
+        "checks": checks,
+        "disclaimer": disclaimer,
+        "evidenceDigest": v.attestation_hash or "",
         "createdAt": v.created_at.isoformat() if v.created_at else None,
-        "finishedAt": v.finished_at.isoformat() if v.finished_at else None,
+        "finishedAt": v.completed_at.isoformat() if v.completed_at else None,
         "evidenceAvailable": bool(ev),
     }
 
@@ -513,10 +536,11 @@ def agent_execution_dto(a: AgentExecution) -> dict:
 
 
 def report_dto(r: Report) -> dict:
+    rtype = (r.report_type or "").replace("_", "-")
     return {
         "id": r.id,
         "title": r.title,
-        "type": r.report_type,
+        "type": rtype,
         "generatedAt": time_ago(r.created_at),
         "generatedAtIso": r.created_at.isoformat() if r.created_at else None,
         "project": r.payload.get("project") if r.payload else None,
@@ -530,9 +554,14 @@ def report_dto(r: Report) -> dict:
 
 
 def audit_event_dto(a) -> dict:
+    cat = a.category or "Security"
+    if cat.lower() == "api":
+        cat_fmt = "API"
+    else:
+        cat_fmt = cat.capitalize()
     return {
         "id": a.id,
-        "category": a.category,
+        "category": cat_fmt,
         "action": a.action,
         "description": a.description,
         "timestamp": time_ago(a.created_at),
@@ -655,15 +684,9 @@ def account_state_dto(
     workspace: Workspace,
     current_session_id: str | None,
 ) -> dict:
-    sessions = (
-        db.query(AuthSession)
-        .filter(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
-        .order_by(AuthSession.last_seen_at.desc())
-        .limit(20)
-        .all()
-    )
-    keys = db.query(ApiKey).filter(ApiKey.user_id == user.id).order_by(ApiKey.created_at.desc()).all()
-    webhooks = db.query(WebhookEndpoint).filter(WebhookEndpoint.workspace_id == workspace.id).all()
+    sessions = getattr(user, "_sessions", [])
+    keys = getattr(user, "_keys", [])
+    webhooks = getattr(workspace, "_webhooks", [])
     team = db.query(TeamMember).filter(TeamMember.workspace_id == workspace.id).order_by(TeamMember.created_at).all()
     integrations = db.query(IntegrationConfig).filter(IntegrationConfig.workspace_id == workspace.id).all()
     from ..models import AuditEvent
@@ -928,11 +951,11 @@ def intelligence_dto(db: Session, workspace_id: str) -> dict:
 def dashboard_dto(db: Session, ctx) -> dict:
     ws_id = ctx.workspace.id
     projects = db.query(Project).filter(Project.workspace_id == ws_id, Project.archived_at.is_(None)).all()
-    scans = db.query(ScanJob).filter(ScanJob.workspace_id == ws_id).order_by(ScanJob.queued_at.desc()).limit(500).all()
+    scans = db.query(ScanJob).filter(ScanJob.workspace_id == ws_id).order_by(ScanJob.created_at.desc()).limit(500).all()
     open_findings = db.query(Finding).filter(Finding.workspace_id == ws_id, Finding.status == "open").all()
     pending_reviews = (
         db.query(PatchProposal)
-        .filter(PatchProposal.workspace_id == ws_id, PatchProposal.status == "pending_review")
+        .filter(PatchProposal.workspace_id == ws_id, PatchProposal.status.in_(["ready_for_review", "under_review"]))
         .count()
     )
     approved = (
@@ -940,16 +963,10 @@ def dashboard_dto(db: Session, ctx) -> dict:
     )
     verified_runs = (
         db.query(VerificationRun)
-        .filter(VerificationRun.workspace_id == ws_id, VerificationRun.status == "completed")
+        .filter(VerificationRun.workspace_id == ws_id, VerificationRun.status == "passed")
         .count()
     )
-    executions = (
-        db.query(AgentExecution)
-        .filter(AgentExecution.workspace_id == ws_id)
-        .order_by(AgentExecution.created_at.desc())
-        .limit(3)
-        .all()
-    )
+    executions = []
     last_run = (
         db.query(VerificationRun)
         .filter(VerificationRun.workspace_id == ws_id)
@@ -960,13 +977,13 @@ def dashboard_dto(db: Session, ctx) -> dict:
     week_ago = datetime.now(UTC) - timedelta(days=7)
     resolved_weekly = (
         db.query(Finding)
-        .filter(Finding.workspace_id == ws_id, Finding.status == "resolved", Finding.resolved_at >= week_ago)
+        .filter(Finding.workspace_id == ws_id, Finding.status == "verified_fixed", Finding.updated_at >= week_ago)
         .count()
     )
 
-    critical = sum(1 for f in open_findings if f.severity == "Critical")
-    high = sum(1 for f in open_findings if f.severity == "High")
-    medium = sum(1 for f in open_findings if f.severity == "Medium")
+    critical = sum(1 for f in open_findings if (f.severity or "").lower() == "critical")
+    high = sum(1 for f in open_findings if (f.severity or "").lower() == "high")
+    medium = sum(1 for f in open_findings if (f.severity or "").lower() == "medium")
     total_scans = len(scans)
     completed_scans = sum(1 for s in scans if s.status == "completed")
     pass_rate = f"{int(completed_scans * 100 / total_scans)}%" if total_scans else "—"

@@ -8,7 +8,9 @@ from ...models import (
     AgentExecution,
     Finding,
     PatchProposal,
+    PatchVersion,
     Project,
+    ScanJob,
     VerificationRun,
     Workspace,
 )
@@ -29,10 +31,42 @@ def dashboard_overview(ctx: CtxDep, db: DbDep) -> dict:
     return dashboard_dto(db, ctx)
 
 
+def _scan_to_agent_execution(db: DbDep, job: ScanJob) -> AgentExecution:
+    project = db.get(Project, job.repository_id)
+    dur = (job.duration_seconds or 1) * 1000
+    rev_digest = job.commit_sha
+    stages = [
+        {"name": "Static Analysis", "status": "completed", "duration": f"{dur / 2000:.1f}s"},
+        {"name": "Rule Correlation", "status": "completed", "duration": f"{dur / 2000:.1f}s"},
+    ]
+    sev_type = "critical" if job.critical_count > 0 else ("warning" if job.high_count > 0 else "success")
+    badge = "Vulnerabilities Found" if (job.findings_count > 0) else "Clean"
+    return AgentExecution(
+        id=str(job.id),
+        display_id=f"#EX-{str(job.id)[:6].upper()}",
+        severity_type=sev_type,
+        severity_badge=badge,
+        service=project.name if project else "unknown",
+        title=f"Scan: {job.scan_type.upper()} ({project.name if project else 'unknown'})",
+        start_time=job.started_at or job.created_at,
+        duration_ms=dur,
+        revision_digest=rev_digest,
+        stages=stages,
+        trace_lines=job.logs or [],
+        created_at=job.created_at,
+    )
+
+
 @router.get("/agent-executions")
 def agent_executions(ctx: CtxDep, db: DbDep, stream: str = "all", severity: str = "all", q: str = "") -> dict:
-    query = db.query(AgentExecution).filter(AgentExecution.workspace_id == ctx.workspace.id)
-    executions = query.order_by(AgentExecution.created_at.desc()).limit(200).all()
+    jobs = (
+        db.query(ScanJob)
+        .filter(ScanJob.workspace_id == ctx.workspace.id)
+        .order_by(ScanJob.created_at.desc())
+        .limit(200)
+        .all()
+    )
+    executions = [_scan_to_agent_execution(db, j) for j in jobs]
     if q:
         needle = q.lower()
         executions = [
@@ -58,7 +92,8 @@ def agent_executions(ctx: CtxDep, db: DbDep, stream: str = "all", severity: str 
 
 @router.get("/agent-activity/telemetry")
 def agent_telemetry(ctx: CtxDep, db: DbDep) -> dict:
-    executions = db.query(AgentExecution).filter(AgentExecution.workspace_id == ctx.workspace.id).all()
+    jobs = db.query(ScanJob).filter(ScanJob.workspace_id == ctx.workspace.id).all()
+    executions = [_scan_to_agent_execution(db, j) for j in jobs]
     success = sum(1 for e in executions if e.severity_type == "success")
     projects = db.query(Project).filter(Project.workspace_id == ctx.workspace.id, Project.archived_at.is_(None)).all()
     return {
@@ -121,14 +156,15 @@ def verified_fixes(ctx: CtxDep, db: DbDep, q: str = "") -> dict:
     # With execution disabled, only static re-analysis verifications can complete — honest.
     runs = (
         db.query(VerificationRun)
-        .filter(VerificationRun.workspace_id == ctx.workspace.id, VerificationRun.status == "completed")
+        .filter(VerificationRun.workspace_id == ctx.workspace.id, VerificationRun.status == "passed")
         .order_by(VerificationRun.created_at.desc())
         .limit(200)
         .all()
     )
     items = []
     for run in runs:
-        patch = db.get(PatchProposal, run.patch_id)
+        patch_ver = db.get(PatchVersion, run.patch_version_id)
+        patch = patch_ver.patch if patch_ver else db.get(PatchProposal, run.patch_id)
         if patch is None or patch.status != "approved":
             continue
         finding = db.get(Finding, patch.finding_id)
@@ -173,7 +209,7 @@ def counts(ctx: CtxDep, db: DbDep) -> dict:
     vulns = db.query(Finding).filter(Finding.workspace_id == ws, Finding.status == "open").count()
     reviews = (
         db.query(PatchProposal)
-        .filter(PatchProposal.workspace_id == ws, PatchProposal.status == "pending_review")
+        .filter(PatchProposal.workspace_id == ws, PatchProposal.status.in_(["ready_for_review", "under_review"]))
         .count()
     )
     approved = (

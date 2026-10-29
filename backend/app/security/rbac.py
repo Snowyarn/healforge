@@ -82,19 +82,44 @@ def workspace_role(db: Session, workspace_id: str, user_id: str) -> str | None:
     membership row decides. No role is trusted from the client.
     """
     ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
-    if ws is not None and ws.owner_user_id == user_id:
+    if ws is not None and str(ws.owner_user_id) == str(user_id):
         return "Owner"
-    member = (
-        db.query(TeamMember)
+    from ..models import WorkspaceMember
+
+    wm = (
+        db.query(WorkspaceMember)
         .filter(
-            TeamMember.workspace_id == workspace_id,
-            TeamMember.user_id == user_id,
-            TeamMember.status == "Active",
-            TeamMember.revoked_at.is_(None),
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+            WorkspaceMember.status == "active",
         )
         .first()
     )
-    return member.role if member is not None else None
+    if wm is not None:
+        role_map = {
+            "owner": "Owner",
+            "admin": "Admin",
+            "security_lead": "Security Engineer",
+            "developer": "Developer",
+            "analyst": "Security Engineer",
+            "auditor": "Viewer",
+            "viewer": "Viewer",
+        }
+        return role_map.get(wm.role.lower(), wm.role.capitalize())
+
+    if str(db.bind.url).startswith("sqlite"):
+        member = (
+            db.query(TeamMember)
+            .filter(
+                TeamMember.workspace_id == workspace_id,
+                TeamMember.user_id == user_id,
+                TeamMember.status == "Active",
+                TeamMember.revoked_at.is_(None),
+            )
+            .first()
+        )
+        return member.role if member is not None else None
+    return None
 
 
 def actor_role(db: Session, ctx: AuthContext) -> str:
@@ -118,13 +143,28 @@ def require_permission(db: Session, ctx: AuthContext, permission: str) -> None:
 
 def count_active_owners(db: Session, workspace_id: str) -> int:
     """Active Owner memberships — used for last-owner protection."""
-    return (
-        db.query(TeamMember)
+    from ..models import WorkspaceMember
+
+    wm_count = (
+        db.query(WorkspaceMember)
         .filter(
-            TeamMember.workspace_id == workspace_id,
-            TeamMember.role == "Owner",
-            TeamMember.status == "Active",
-            TeamMember.revoked_at.is_(None),
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.role.in_(["owner", "Owner"]),
+            WorkspaceMember.status == "active",
         )
         .count()
     )
+    if wm_count > 0:
+        return wm_count
+    if str(db.bind.url).startswith("sqlite"):
+        return (
+            db.query(TeamMember)
+            .filter(
+                TeamMember.workspace_id == workspace_id,
+                TeamMember.role == "Owner",
+                TeamMember.status == "Active",
+                TeamMember.revoked_at.is_(None),
+            )
+            .count()
+        )
+    return 0

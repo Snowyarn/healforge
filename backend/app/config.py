@@ -11,9 +11,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Database
-    database_url: str = "sqlite:///./healforge.db"
-    database_schema: str = "healforge_backend"
+    # Database (Supabase PostgreSQL is the authoritative data source)
+    database_url: str = "postgresql+psycopg://postgres:postgres@127.0.0.1:54322/postgres"
+    database_schema: str = "public"
+
+    # Supabase Platform Connection
+    supabase_url: str = "http://127.0.0.1:54321"
+    supabase_anon_key: str = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9."
+        "CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
+    )
+    supabase_jwt_secret: str = "super-secret-jwt-token-with-at-least-32-characters-long"
+    supabase_service_role_key: str = ""
 
     # AI Provider: "nebius" (hackathon default) or "nvidia"
     ai_provider: str = "nebius"
@@ -32,11 +42,10 @@ class Settings(BaseSettings):
     nvidia_timeout_seconds: float = 60.0
     nvidia_max_output_tokens: int = 2048
 
-    # Auth
-    # FAIL CLOSED: single-user bootstrap (auto-provisioned unauthenticated dev owner)
-    # is opt-in only. Production deployments must NOT enable it — see main.validate_startup.
+    # Auth & Identity (aligned with Supabase seed user Alex Vance)
     healforge_single_user: bool = False
-    healforge_default_user_email: str = "dev@healforge.local"
+    healforge_default_user_email: str = "alex.vance@healforge.internal"
+    healforge_default_user_id: str = "00000000-0000-0000-0000-000000000001"
     session_ttl_hours: int = 168
 
     # Deployment mode: "local" (developer machine) or "production" (real deployment).

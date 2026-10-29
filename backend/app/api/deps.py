@@ -29,6 +29,23 @@ def get_ctx(request: Request, db: DbDep) -> AuthContext:
             status_code=401,
             detail={"error": {"code": "unauthorized", "message": "No valid session. Reload to start a session."}},
         )
+    # Set PostgreSQL session-scoped RLS claims for this authenticated request
+    if not str(db.bind.url).startswith("sqlite"):
+        try:
+            import json
+            from sqlalchemy import text
+
+            claims = json.dumps(
+                {
+                    "sub": str(ctx.user.id),
+                    "role": "authenticated",
+                    "email": ctx.user.email,
+                }
+            )
+            db.execute(text("SELECT set_config('request.jwt.claims', :claims, false)"), {"claims": claims})
+            db.execute(text("SET role = authenticated"))
+        except Exception:
+            pass
     return ctx
 
 
