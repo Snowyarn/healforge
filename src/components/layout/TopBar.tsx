@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { useAccountState } from '../../services/accountService';
+import { useAccountStateLoaded } from '../../services/accountService';
+import type { ScreenId } from '../../types';
 
 interface TopBarProps {
   currentRepository: string;
@@ -10,6 +11,12 @@ interface TopBarProps {
   onToggleMobileMenu?: () => void;
   onTriggerRefresh: () => void;
   isLoading?: boolean;
+  notifications?: {
+    items: { id: string; title: string; message: string; icon: string; linkScreen: string; read: boolean }[];
+    unread: number;
+  };
+  onMarkNotificationRead?: (id: string) => void;
+  onNavigate?: (screen: ScreenId) => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -21,37 +28,15 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleMobileMenu,
   onTriggerRefresh,
   isLoading = false,
+  notifications,
+  onMarkNotificationRead,
+  onNavigate,
 }) => {
   const [isRepoOpen, setIsRepoOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
-  const { profile } = useAccountState();
-
-  const notifications = [
-    {
-      id: 'n-1',
-      title: 'Autonomous Patch Generated',
-      service: 'payments-api',
-      desc: 'CVE-2024-2149 AST patch ready for review.',
-      time: '2m ago',
-      unread: true,
-    },
-    {
-      id: 'n-2',
-      title: 'gVisor Sandbox Pass',
-      service: 'core-api-service',
-      desc: 'All 1,420 regression tests passed for Patch #9402.',
-      time: '14m ago',
-      unread: false,
-    },
-    {
-      id: 'n-3',
-      title: 'Critical Vulnerability Flagged',
-      service: 'auth-service',
-      desc: 'CVE-2024-41110 Docker auth bypass detected.',
-      time: '1h ago',
-      unread: false,
-    },
-  ];
+  const { profile } = useAccountStateLoaded();
+  const items = notifications?.items ?? [];
+  const unread = notifications?.unread ?? 0;
 
   return (
     <header className="fixed top-0 left-0 lg:left-64 right-0 h-16 bg-surface/80 backdrop-blur-xl z-40 flex items-center justify-between px-margin shadow-[0_1px_8px_rgba(0,0,0,0.04)]">
@@ -122,15 +107,15 @@ export const TopBar: React.FC<TopBarProps> = ({
           onClick={onTriggerRefresh}
           disabled={isLoading}
           className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-surface-container hover:bg-surface-container-high text-xs font-label-ui text-text-secondary hover:text-text-primary border border-border-subtle transition-all disabled:opacity-50"
-          title="Simulate data fetch to test skeleton loading states"
+          title="Reload workspace data from the backend"
         >
           <span className={`material-symbols-outlined text-[16px] ${isLoading ? 'animate-spin' : ''}`}>
             refresh
           </span>
-          <span className="hidden md:inline">Simulate Loading</span>
+          <span className="hidden md:inline">Refresh Data</span>
         </button>
 
-        {/* Notification Button & Menu */}
+        {/* Notification Button & Menu (real server events) */}
         <div className="relative">
           <button
             onClick={() => setIsNotificationsOpen(!isNotificationsOpen)}
@@ -138,27 +123,39 @@ export const TopBar: React.FC<TopBarProps> = ({
             aria-label="Notifications"
           >
             <span className="material-symbols-outlined text-[20px]">notifications</span>
-            <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-status-critical" />
+            {unread > 0 && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-status-critical" />}
           </button>
 
           {isNotificationsOpen && (
             <div className="absolute right-0 mt-2 w-80 bg-surface-card rounded-xl shadow-lg border border-border-subtle py-2 z-50 animate-fade-in">
               <div className="px-4 py-2 border-b border-border-subtle flex items-center justify-between">
-                <span className="font-label-ui text-body-sm text-text-primary">Autonomous Engine Alerts</span>
-                <span className="text-label-code-sm bg-primary/10 text-primary px-1.5 py-0.5 rounded">3 Updates</span>
+                <span className="font-label-ui text-body-sm text-text-primary">Workspace Notifications</span>
+                <span className="text-label-code-sm bg-primary/10 text-primary px-1.5 py-0.5 rounded">
+                  {unread} unread
+                </span>
               </div>
               <div className="divide-y divide-border-subtle/50 max-h-72 overflow-y-auto">
-                {notifications.map((n) => (
-                  <div key={n.id} className="p-3 hover:bg-surface-container/50 transition-colors">
+                {items.length === 0 && (
+                  <p className="p-4 text-body-sm text-text-muted">
+                    No notifications yet — they appear when scans complete or patches change state.
+                  </p>
+                )}
+                {items.map((n) => (
+                  <button
+                    key={n.id}
+                    onClick={() => {
+                      if (!n.read) onMarkNotificationRead?.(n.id);
+                      if (n.linkScreen && onNavigate) onNavigate(n.linkScreen as ScreenId);
+                      setIsNotificationsOpen(false);
+                    }}
+                    className="w-full text-left p-3 hover:bg-surface-container/50 transition-colors"
+                  >
                     <div className="flex items-center justify-between mb-1">
                       <span className="font-label-ui text-[12px] text-text-primary">{n.title}</span>
-                      <span className="text-[11px] text-text-muted font-label-code-sm">{n.time}</span>
+                      {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-primary" />}
                     </div>
-                    <p className="text-[12px] text-text-secondary">{n.desc}</p>
-                    <span className="inline-block mt-1 text-[11px] font-label-code-sm text-text-muted bg-surface-container px-1.5 rounded">
-                      {n.service}
-                    </span>
-                  </div>
+                    <p className="text-[12px] text-text-secondary">{n.message}</p>
+                  </button>
                 ))}
               </div>
             </div>

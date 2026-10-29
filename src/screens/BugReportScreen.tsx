@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { ScreenId, BugReport, SeverityLevel } from '../types';
-import { mockBugReports, mockProjects } from '../services/mockData';
+import { endpoints } from '../services/api';
+import type { ProjectDto } from '../services/api';
 import { workbenchService } from '../services/workbenchService';
 
 interface BugReportScreenProps {
@@ -12,12 +13,27 @@ export const BugReportScreen: React.FC<BugReportScreenProps> = ({
   onNavigate,
   onTriggerToast,
 }) => {
-  const [reports, setReports] = useState<BugReport[]>(mockBugReports);
+  const [reports, setReports] = useState<BugReport[]>([]);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<BugReport['category']>('Authorization Bypass');
   const [severity, setSeverity] = useState<SeverityLevel>('High');
-  const [affectedRepo, setAffectedRepo] = useState(mockProjects[0].name);
+  const [affectedRepo, setAffectedRepo] = useState('');
+  const [projects, setProjects] = useState<ProjectDto[]>([]);
+
+  useEffect(() => {
+    endpoints
+      .bugReports()
+      .then(({ reports: rows }) => setReports(rows as unknown as BugReport[]))
+      .catch(() => undefined);
+    endpoints
+      .projects()
+      .then(({ projects: rows }) => {
+        setProjects(rows);
+        setAffectedRepo((prev) => prev || rows[0]?.name || '');
+      })
+      .catch(() => undefined);
+  }, []);
   const [affectedFile, setAffectedFile] = useState('');
   const [stepsToReproduce, setStepsToReproduce] = useState('');
   const [expectedBehavior, setExpectedBehavior] = useState('');
@@ -51,11 +67,11 @@ export const BugReportScreen: React.FC<BugReportScreenProps> = ({
     });
     setIsSubmitting(false);
 
-    setReports([result.data, ...reports]);
+    setReports([result, ...reports]);
     onTriggerToast({
       type: 'success',
       title: 'Bug Report Dispatched',
-      message: `Report ${result.data.id} submitted. AST remediation agent will inspect the sink.`,
+      message: `Report ${result.id} submitted and persisted. It now appears in the triage queue.`,
     });
 
     // Reset form
@@ -159,7 +175,7 @@ export const BugReportScreen: React.FC<BugReportScreenProps> = ({
                   onChange={(e) => setAffectedRepo(e.target.value)}
                   className="w-full px-3.5 py-2 rounded-lg bg-surface-container border border-border-subtle focus:border-primary text-xs outline-none text-text-primary font-label-ui"
                 >
-                  {mockProjects.map((p) => (
+                  {projects.map((p) => (
                     <option key={p.id} value={p.name}>
                       {p.name}
                     </option>

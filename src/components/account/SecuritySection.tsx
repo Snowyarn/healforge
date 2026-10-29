@@ -16,6 +16,9 @@ export const SecuritySection: React.FC<SecuritySectionProps> = ({ security, onTr
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [showMfaSetup, setShowMfaSetup] = useState(false);
   const [totpInput, setTotpInput] = useState('');
+  const [mfaSecret, setMfaSecret] = useState<string | null>(null);
+  const [mfaUri, setMfaUri] = useState<string | null>(null);
+  const [mfaBusy, setMfaBusy] = useState(false);
 
   // Password complexity checks
   const hasLength = newPass.length >= 10;
@@ -25,7 +28,7 @@ export const SecuritySection: React.FC<SecuritySectionProps> = ({ security, onTr
   const hasSymbol = /[^A-Za-z0-9]/.test(newPass);
   const isPasswordValid = hasLength && hasUpper && hasLower && hasNumber && hasSymbol;
 
-  const handleChangePassword = (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newPass !== confirmPass) {
       onTriggerToast({
@@ -44,7 +47,7 @@ export const SecuritySection: React.FC<SecuritySectionProps> = ({ security, onTr
       return;
     }
 
-    const res = accountService.changePassword(currentPass, newPass);
+    const res = await accountService.changePassword(currentPass, newPass);
     if (res.success) {
       onTriggerToast({
         type: 'success',
@@ -63,22 +66,35 @@ export const SecuritySection: React.FC<SecuritySectionProps> = ({ security, onTr
     }
   };
 
-  const handleToggleMfa = () => {
+  const handleToggleMfa = async () => {
     if (security.mfaEnabled) {
-      // Disable
-      accountService.toggleMfa(false);
+      // Disabling requires a valid TOTP or recovery code — ask for it first.
+      const code = window.prompt(
+        'Enter a current 6-digit TOTP code (or a recovery code) to disable MFA:',
+      );
+      if (!code) return;
+      const res = await accountService.mfaDisable(code.trim());
       onTriggerToast({
-        type: 'warning',
-        title: '2FA Disabled',
-        message: 'Two-factor authentication has been turned off for this account.',
+        type: res.success ? 'warning' : 'error' in res ? 'warning' : 'warning',
+        title: res.success ? '2FA Disabled' : 'Disable Failed',
+        message: res.message,
       });
-    } else {
-      // Open setup dialog
-      setShowMfaSetup(true);
+      return;
     }
+    // Start REAL server-side enrollment: fetch secret + provisioning URI.
+    setMfaBusy(true);
+    const start = await accountService.mfaStart();
+    setMfaBusy(false);
+    if (!start.success || !start.secret) {
+      onTriggerToast({ type: 'warning', title: 'MFA Enrollment Failed', message: start.message });
+      return;
+    }
+    setMfaSecret(start.secret);
+    setMfaUri(start.uri ?? null);
+    setShowMfaSetup(true);
   };
 
-  const handleConfirmMfaSetup = (e: React.FormEvent) => {
+  const handleConfirmMfaSetup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (totpInput.length !== 6) {
       onTriggerToast({
@@ -88,25 +104,45 @@ export const SecuritySection: React.FC<SecuritySectionProps> = ({ security, onTr
       });
       return;
     }
-    accountService.toggleMfa(true);
+    setMfaBusy(true);
+    const res = await accountService.mfaEnable(totpInput.trim());
+    setMfaBusy(false);
+    if (!res.success) {
+      onTriggerToast({ type: 'warning', title: 'Activation Failed', message: res.message });
+      return;
+    }
     setShowMfaSetup(false);
     setTotpInput('');
+    setMfaSecret(null);
+    setMfaUri(null);
+    if (res.recoveryCodes) {
+      setRecoveryCodes(res.recoveryCodes);
+      setIsRecoveryModalOpen(true);
+    }
     onTriggerToast({
       type: 'success',
       title: '2FA Activated',
-      message: 'TOTP Authenticator application has been registered successfully.',
+      message: 'TOTP registered. Store your recovery codes now — they are shown once.',
     });
   };
 
-  const handleOpenRecoveryModal = () => {
-    const codes = accountService.generateRecoveryCodes();
-    setRecoveryCodes(codes);
+  const handleOpenRecoveryModal = async () => {
+    const res = await accountService.regenerateRecoveryCodes();
+    if (!res.success || !res.recoveryCodes) {
+      onTriggerToast({ type: 'warning', title: 'Recovery Codes', message: res.message });
+      return;
+    }
+    setRecoveryCodes(res.recoveryCodes);
     setIsRecoveryModalOpen(true);
   };
 
-  const handleRegenerateCodes = () => {
-    const codes = accountService.generateRecoveryCodes();
-    setRecoveryCodes(codes);
+  const handleRegenerateCodes = async () => {
+    const res = await accountService.regenerateRecoveryCodes();
+    if (!res.success || !res.recoveryCodes) {
+      onTriggerToast({ type: 'warning', title: 'Regeneration Failed', message: res.message });
+      return;
+    }
+    setRecoveryCodes(res.recoveryCodes);
     onTriggerToast({
       type: 'info',
       title: 'Recovery Codes Regenerated',
@@ -291,30 +327,32 @@ export const SecuritySection: React.FC<SecuritySectionProps> = ({ security, onTr
               </button>
             </div>
 
-            <div className="flex flex-col sm:flex-row items-center gap-6">
-              {/* Simulated QR Visual */}
-              <div className="w-32 h-32 bg-white rounded-xl border border-border-subtle p-2 flex flex-col items-center justify-center shrink-0 shadow-sm">
-                <div className="grid grid-cols-6 gap-1 w-full h-full p-1 bg-surface-dark rounded">
-                  {Array.from({ length: 36 }).map((_, i) => (
-                    <div
-                      key={i}
-                      className={`rounded-[1px] ${
-                        (i % 2 === 0 && i % 3 === 0) || i < 7 || i > 28
-                          ? 'bg-primary-fixed'
-                          : 'bg-surface-dark'
-                      }`}
-                    />
-                  ))}
+            <div className="flex flex-col sm:flex-row items-start gap-6">
+              {/* Real enrollment data — QR generation is not bundled; apps accept manual entry */}
+              <div className="w-44 rounded-xl bg-surface-dark border border-outline/20 p-3.5 text-surface-bright shrink-0 space-y-2">
+                <div className="text-[9px] uppercase tracking-wider text-secondary-fixed-dim">
+                  Manual setup key
                 </div>
+                <code className="block font-mono text-[11px] text-primary-fixed break-all select-all">
+                  {mfaSecret ?? '—'}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => navigator.clipboard?.writeText(mfaSecret ?? '')}
+                  className="w-full text-[10px] py-1 rounded bg-white/10 hover:bg-white/20 text-surface-bright font-semibold"
+                >
+                  Copy Secret
+                </button>
               </div>
 
               <div className="space-y-3 flex-1">
                 <p className="text-xs text-text-secondary leading-relaxed">
-                  Scan the QR code with your authenticator app, or manually enter the secret key below:
+                  Add the key to your authenticator app (Google Authenticator, 1Password, Aegis…), or paste
+                  this provisioning URI if your app supports it:
                 </p>
                 <div className="flex items-center gap-2">
-                  <code className="px-3 py-1.5 rounded-lg bg-surface-dark border border-outline/20 font-mono text-xs text-primary-fixed select-all">
-                    HF-SEC-7749-3382-A09F
+                  <code className="px-3 py-1.5 rounded-lg bg-surface-dark border border-outline/20 font-mono text-[10px] text-primary-fixed select-all break-all max-w-md">
+                    {mfaUri ?? '—'}
                   </code>
                 </div>
 
@@ -329,9 +367,10 @@ export const SecuritySection: React.FC<SecuritySectionProps> = ({ security, onTr
                   />
                   <button
                     type="submit"
-                    className="px-4 py-1.5 rounded-lg bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold transition-all"
+                    disabled={mfaBusy}
+                    className="px-4 py-1.5 rounded-lg bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold transition-all disabled:opacity-50"
                   >
-                    Verify & Activate
+                    {mfaBusy ? 'Verifying…' : 'Verify & Activate'}
                   </button>
                 </form>
               </div>

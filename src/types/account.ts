@@ -131,7 +131,8 @@ export interface WebhookEndpoint {
   events: string[];
   createdAt: string;
   status: 'healthy' | 'degraded' | 'disabled';
-  signingSecret: string;
+  /** Honest state: registration works, but no delivery worker is configured in this deployment. */
+  deliveryConfigured?: boolean;
 }
 
 export interface PrivacyPreferences {
@@ -164,6 +165,9 @@ export interface ConnectedIntegration {
   accountName: string | null;
   scope: string | null;
   lastSync: string | null;
+  /** Honest not-configured state (server-derived; no fake connections). */
+  notConfigured?: boolean;
+  setupInstructions?: string;
 }
 
 export type TeamRole = 'Owner' | 'Admin' | 'Security Engineer' | 'Developer' | 'Viewer';
@@ -202,7 +206,9 @@ export interface AccountState {
   profile: UserProfile;
   security: SecuritySettings;
   sessions: ActiveSession[];
-  subscription: SubscriptionPlan;
+  /** Honest: null when no payment provider is configured (never a fake plan). */
+  subscription: SubscriptionPlan | null;
+  billingNotConfigured?: boolean;
   apiKeys: ApiKey[];
   webhooks: WebhookEndpoint[];
   privacy: PrivacyPreferences;

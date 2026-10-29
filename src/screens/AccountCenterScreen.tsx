@@ -98,6 +98,16 @@ export const AccountCenterScreen: React.FC<AccountCenterScreenProps> = ({
     })).filter((cat) => cat.items.length > 0);
   }, [searchQuery]);
 
+  // Account data loads from the backend; show a loading state until hydrated.
+  if (!state) {
+    return (
+      <div className="flex flex-col w-full p-margin space-y-6 animate-fade-in">
+        <div className="bg-surface-card border border-border-subtle rounded-2xl h-28 animate-pulse" />
+        <div className="bg-surface-card border border-border-subtle rounded-2xl h-96 animate-pulse" />
+      </div>
+    );
+  }
+
   // Find active item metadata for breadcrumbs
   let activeItem = { item: SETTINGS_CATEGORIES[0].items[0], category: 'Account & Identity' };
   for (const cat of SETTINGS_CATEGORIES) {
@@ -269,7 +279,7 @@ export const AccountCenterScreen: React.FC<AccountCenterScreenProps> = ({
 
             {activeSection === 'billing' && (
               <BillingSection
-                subscription={state.subscription}
+                subscription={state.subscription ?? undefined}
                 onTriggerToast={onTriggerToast}
               />
             )}

@@ -1,349 +1,387 @@
-import React, { useState } from 'react';
-import type { VerificationSession } from '../types';
+import React, { useCallback, useEffect, useState } from 'react';
+import type { PatchItem } from '../types';
+import { ApiError, endpoints } from '../services/api';
+import type { VerificationRunDto, VerificationStatusDto } from '../services/api';
 
 interface VerificationSandboxScreenProps {
-  session: VerificationSession;
+  verificationStatus: VerificationStatusDto | null;
+  patch: PatchItem | null;
   onTriggerToast: (toast: { type: 'success' | 'info' | 'warning'; title: string; message: string }) => void;
+  onRunsChanged: () => void;
 }
 
+/**
+ * Safe Verification UI.
+ *
+ * Truthfully shows the isolation boundary: in this deployment NO verified
+ * isolated runner exists, so execution-based verification is disabled and
+ * honestly returns `verification_unavailable` — there is no host fallback and
+ * no arbitrary command field. Static re-analysis is offered as real, limited
+ * evidence (the detection rule is re-run against the patched code).
+ */
 export const VerificationSandboxScreen: React.FC<VerificationSandboxScreenProps> = ({
-  session,
+  verificationStatus,
+  patch,
   onTriggerToast,
+  onRunsChanged,
 }) => {
-  const [isRunning, setIsRunning] = useState(false);
-  const [activeStageIndex, setActiveStageIndex] = useState(3);
-  const [showTraceModal, setShowTraceModal] = useState(false);
+  const [runs, setRuns] = useState<VerificationRunDto[]>([]);
+  const [selectedRun, setSelectedRun] = useState<VerificationRunDto | null>(null);
+  const selectedRunId = selectedRun?.id;
+  const [running, setRunning] = useState<'execution' | 'static_reanalysis' | null>(null);
 
-  const handleRerun = () => {
-    setIsRunning(true);
-    setActiveStageIndex(0);
+  const loadRuns = useCallback(async () => {
+    try {
+      const res = await endpoints.verificationRuns(patch?.id);
+      setRuns(res.runs);
+      const current = res.runs.find((r) => r.id === selectedRunId) ?? res.runs[0] ?? null;
+      setSelectedRun(current);
+    } catch {
+      setRuns([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patch?.id]);
 
-    const stepInterval = setInterval(() => {
-      setActiveStageIndex((prev) => {
-        if (prev >= 3) {
-          clearInterval(stepInterval);
-          setIsRunning(false);
-          onTriggerToast({
-            type: 'success',
-            title: 'Verification Suite Completed',
-            message: 'All 4 sandbox verification stages passed in ephemeral gVisor microVM container. Exit code: 0.',
-          });
-          return 3;
-        }
-        return prev + 1;
+  useEffect(() => {
+    loadRuns();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patch?.id]);
+
+  const handleRun = async (mode: 'execution' | 'static_reanalysis') => {
+    if (!patch) {
+      onTriggerToast({
+        type: 'info',
+        title: 'No Patch Selected',
+        message: 'Approve or review a patch first — verification always binds to an exact patch and revision.',
       });
-    }, 900);
+      return;
+    }
+    setRunning(mode);
+    try {
+      const { run } = await endpoints.createVerificationRun(patch.id, mode);
+      await loadRuns();
+      setSelectedRun(run);
+      onRunsChanged();
+      if (mode === 'execution') {
+        onTriggerToast({
+          type: 'warning',
+          title: 'Execution Verification Unavailable',
+          message: 'No isolated runner is verified in this deployment, so execution was honestly refused.',
+        });
+      } else if (run.status === 'completed') {
+        onTriggerToast({
+          type: 'success',
+          title: 'Static Re-analysis Passed',
+          message: 'The detection rule no longer matches the patched code. See evidence for limitations.',
+        });
+      } else {
+        onTriggerToast({
+          type: 'warning',
+          title: 'Static Re-analysis Failed',
+          message: 'The rule still matches the patched code — the pattern was not removed.',
+        });
+      }
+    } catch (exc) {
+      onTriggerToast({
+        type: 'warning',
+        title: 'Verification Error',
+        message: exc instanceof ApiError ? exc.message : 'Backend unreachable.',
+      });
+    } finally {
+      setRunning(null);
+    }
   };
 
-  const handleCopyLogs = () => {
-    const rawLogs = session.terminalLogs.map((l) => `${l.timestamp} ${l.text}`).join('\n');
-    navigator.clipboard?.writeText(rawLogs);
-    onTriggerToast({
-      type: 'info',
-      title: 'Logs Copied to Clipboard',
-      message: 'Full execution stream with timestamps copied.',
-    });
+  const handleExportEvidence = async () => {
+    if (!selectedRun) return;
+    try {
+      const resp = await fetch(endpoints.verificationEvidenceUrl(selectedRun.id), { credentials: 'include' });
+      if (!resp.ok) throw new Error('download failed');
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `healforge-evidence-${selectedRun.id}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      onTriggerToast({
+        type: 'success',
+        title: 'Evidence Exported',
+        message: 'Evidence bundle downloaded — it lists exactly which checks ran and its limitations.',
+      });
+    } catch {
+      onTriggerToast({ type: 'warning', title: 'Export Failed', message: 'Could not download evidence bundle.' });
+    }
   };
 
-  const handleExportBundle = () => {
-    const evidenceData = {
-      bundleVersion: '2.4.0',
-      patchId: session.patchId,
-      attestation: session.attestation,
-      stages: session.stages,
-      timestamp: new Date().toISOString(),
-      verifiedBy: 'HealForge Secure Enclave gVisor Sandbox v2.9',
-      reproducedCve: 'CVE-2024-3819',
-      unitTestSummary: {
-        total: 1420,
-        passed: 1420,
-        failed: 0,
-        durationSeconds: 6.74,
-      },
-      auditNotice: 'This document is a simulated cryptographic evidence artifact for frontend demonstration.',
-    };
-
-    const blob = new Blob([JSON.stringify(evidenceData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `healforge_evidence_bundle_${session.patchId.toLowerCase().replace(/[^a-z0-9]/g, '_')}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    onTriggerToast({
-      type: 'success',
-      title: 'Evidence Bundle Exported',
-      message: `Downloaded cryptographic evidence manifest for ${session.patchId}.`,
-    });
+  const handleCopyLogs = async () => {
+    if (!selectedRun) return;
+    const lines = [
+      `Verification run ${selectedRun.id}`,
+      `mode=${selectedRun.mode} status=${selectedRun.status}`,
+      selectedRun.reason && `reason: ${selectedRun.reason}`,
+      ...selectedRun.checks.map((c) => `[${c.passed ? 'PASS' : 'FAIL'}] ${c.name} — ${c.detail}`),
+      selectedRun.disclaimer,
+    ].filter(Boolean);
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'));
+      onTriggerToast({ type: 'info', title: 'Logs Copied', message: 'Verification log copied to clipboard.' });
+    } catch {
+      onTriggerToast({ type: 'warning', title: 'Copy Failed', message: 'Clipboard unavailable.' });
+    }
   };
+
+  const policy = verificationStatus?.policy;
+  const executionAvailable = verificationStatus?.execution_available ?? false;
 
   return (
-    <div className="flex flex-col w-full pb-16">
-      {/* Top Banner / Header Context */}
-      <div className="px-margin pt-margin pb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="flex flex-col w-full p-margin space-y-6 animate-fade-in">
+      {/* Header */}
+      <div className="bg-surface-card border border-border-subtle rounded-2xl p-5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="px-2 py-0.5 rounded bg-surface-container text-text-secondary font-label-code-sm border border-border-subtle">
-              {session.patchId}
-            </span>
-            <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-status-verified/10 text-status-verified font-label-code-sm">
-              <span className="w-1.5 h-1.5 rounded-full bg-status-verified animate-pulse" />
-              {isRunning ? 'Running Dynamic Verification...' : session.status}
-            </span>
-          </div>
-          <h1 className="text-headline-lg font-headline-lg text-text-primary tracking-tight">
-            gVisor Sandbox Verification Engine
+          <h1 className="text-xl font-bold font-headline-sm text-text-primary tracking-tight">
+            Verification Sandbox
           </h1>
+          <p className="text-xs text-text-muted mt-0.5">
+            Isolation boundary status and verification evidence for reviewed patches.
+          </p>
         </div>
-
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <button
-            onClick={handleExportBundle}
-            className="px-4 py-2 rounded-lg bg-surface-card border border-border-subtle text-text-primary font-label-ui hover:bg-surface-container transition-all flex items-center gap-2 shadow-sm"
+            onClick={handleExportEvidence}
+            disabled={!selectedRun?.evidenceAvailable}
+            className="px-3.5 py-2 rounded-xl bg-surface-container hover:bg-surface-container-high border border-border-subtle text-xs font-semibold text-text-primary disabled:opacity-40 flex items-center gap-1.5"
           >
-            <span className="material-symbols-outlined text-[18px]">download</span>
-            Export Evidence Bundle
+            <span className="material-symbols-outlined text-[16px]">download</span>
+            <span>Export Evidence Bundle</span>
           </button>
           <button
-            onClick={handleRerun}
-            disabled={isRunning}
-            className="px-4 py-2 rounded-full bg-primary text-on-primary font-label-ui hover:bg-primary/90 transition-all flex items-center gap-2 shadow-sm disabled:opacity-60"
+            onClick={handleCopyLogs}
+            disabled={!selectedRun}
+            className="px-3.5 py-2 rounded-xl bg-surface-container hover:bg-surface-container-high border border-border-subtle text-xs font-semibold text-text-primary disabled:opacity-40 flex items-center gap-1.5"
           >
-            <span className={`material-symbols-outlined text-[18px] ${isRunning ? 'animate-spin' : ''}`}>
-              replay
-            </span>
-            {isRunning ? 'Re-running Tests...' : 'Re-run Verification'}
+            <span className="material-symbols-outlined text-[16px]">content_copy</span>
+            <span>Copy Logs</span>
           </button>
         </div>
       </div>
 
-      {/* Main Content Layout (Bento / Split Workbench) */}
-      <div className="px-margin grid grid-cols-1 lg:grid-cols-12 gap-gutter">
-        {/* Left Column: Lifecycle Stages & Verification Proof (5 Cols) */}
-        <div className="lg:col-span-5 flex flex-col gap-gutter">
-          {/* Lifecycle Stages Card */}
-          <div className="bg-surface-card rounded-xl p-6 shadow-sm border border-border-subtle flex flex-col gap-5">
-            <div className="flex items-center justify-between">
-              <h2 className="text-headline-sm font-headline-sm text-text-primary">Verification Lifecycle</h2>
-              <span className="text-text-muted font-label-code-sm">{session.containerRuntime}</span>
-            </div>
-
-            <div className="relative pl-6 space-y-6 before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-border-subtle">
-              {session.stages.map((stage, idx) => {
-                const isPassed = idx <= activeStageIndex;
-                const isCurrent = isRunning && idx === activeStageIndex;
-
-                return (
-                  <div key={stage.id} className="relative flex items-start gap-3">
-                    <span
-                      className={`absolute -left-6 top-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                        isCurrent
-                          ? 'bg-primary text-on-primary animate-pulse'
-                          : isPassed
-                          ? 'bg-status-success text-on-primary'
-                          : 'bg-surface-container text-text-muted'
-                      }`}
-                    >
-                      {isCurrent ? '●' : isPassed ? '✓' : idx + 1}
-                    </span>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-label-ui text-text-primary">{stage.title}</span>
-                        <span className="text-text-muted font-label-code-sm">{stage.duration}</span>
-                      </div>
-                      <p className="text-body-sm text-text-secondary mt-0.5">{stage.description}</p>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Before and After Vulnerability Status */}
-          <div className="bg-surface-card rounded-xl p-6 shadow-sm border border-border-subtle flex flex-col gap-4">
-            <h2 className="text-headline-sm font-headline-sm text-text-primary">Status Transition</h2>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="p-4 rounded-lg bg-status-critical/10 border border-status-critical/20 flex flex-col gap-1">
-                <span className="text-text-muted font-label-code-sm uppercase">Before Patch</span>
-                <span className="text-headline-sm text-status-critical font-headline-sm flex items-center gap-1.5">
-                  <span className="material-symbols-outlined text-[18px]">warning</span>
-                  {session.statusTransition.before.status}
-                </span>
-                <span className="text-body-sm text-text-secondary mt-1">
-                  {session.statusTransition.before.desc}
-                </span>
-              </div>
-
-              <div className="p-4 rounded-lg bg-status-verified/10 border border-status-verified/20 flex flex-col gap-1">
-                <span className="text-text-muted font-label-code-sm uppercase">After Patch</span>
-                <span className="text-headline-sm text-status-verified font-headline-sm flex items-center gap-1.5">
-                  <span className="material-symbols-outlined text-[18px]">verified</span>
-                  {session.statusTransition.after.status}
-                </span>
-                <span className="text-body-sm text-text-secondary mt-1">
-                  {session.statusTransition.after.desc}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Cryptographic Proof-of-Verification Badge */}
-          <div className="bg-surface-dark rounded-xl p-6 text-surface-bright flex flex-col gap-3 shadow-md border border-outline/20">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary-fixed text-[20px]">
-                  workspace_premium
-                </span>
-                <span className="font-label-ui text-surface-bright">Cryptographic Attestation</span>
-              </div>
-              <span className="px-2 py-0.5 rounded bg-primary/30 text-primary-fixed font-label-code-sm">
-                {session.attestation.algorithm}
+      {/* Isolation boundary — honest state */}
+      <div
+        className={`rounded-2xl p-5 border ${
+          executionAvailable ? 'bg-status-success/5 border-status-success/30' : 'bg-status-high/5 border-status-high/30'
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          <span className="material-symbols-outlined text-status-high text-[22px]">gpp_maybe</span>
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-sm font-bold font-headline-sm text-text-primary">
+                Execution-based verification is {executionAvailable ? 'available' : 'DISABLED'}
+              </h2>
+              <span
+                className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
+                  executionAvailable ? 'bg-status-success/10 text-status-success' : 'bg-status-high/10 text-status-high'
+                }`}
+              >
+                {verificationStatus?.execution_status ?? 'unknown'}
               </span>
             </div>
-            <p className="text-body-sm text-secondary-fixed-dim">
-              {session.attestation.signedBy}. Immutable proof of sandbox execution and regression stability.
+            <p className="text-xs text-text-secondary mt-2 leading-relaxed">
+              {verificationStatus?.reason ??
+                'Loading runner status…'}
             </p>
-            <div className="p-3 rounded bg-black/30 font-label-code-sm text-primary-fixed-dim break-all select-all border border-outline/10">
-              {session.attestation.hash}
-            </div>
-          </div>
-        </div>
-
-        {/* Right Column: Live Execution Console Output Logs (7 Cols) */}
-        <div className="lg:col-span-7 flex flex-col">
-          <div className="bg-surface-dark rounded-xl shadow-md overflow-hidden flex flex-col h-full border border-outline/20">
-            {/* Terminal Header */}
-            <div className="px-4 py-3 bg-surface-dark/90 border-b border-outline/20 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-status-critical/80" />
-                <div className="w-3 h-3 rounded-full bg-status-medium/80" />
-                <div className="w-3 h-3 rounded-full bg-status-success/80" />
-                <span className="ml-2 font-label-code-sm text-secondary-fixed-dim">
-                  gVisor Sandbox Console // Execution Stream [{session.containerId}]
-                </span>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="flex items-center gap-1.5 text-status-success font-label-code-sm">
-                  <span className="w-2 h-2 rounded-full bg-status-success animate-pulse" />
-                  Live Stream Complete
-                </span>
-              </div>
-            </div>
-
-            {/* Terminal Body */}
-            <div className="p-5 font-label-code-md text-secondary-fixed-dim space-y-2 overflow-y-auto flex-1 bg-[#121c19] text-[13px] leading-relaxed selection:bg-primary selection:text-white">
-              {session.terminalLogs.map((log, index) => {
-                if (log.type === 'critical') {
-                  return (
-                    <div
-                      key={index}
-                      className="text-surface-bright bg-status-critical/10 px-2 py-1 rounded border border-status-critical/20"
-                    >
-                      {log.text}
-                    </div>
-                  );
-                }
-
-                if (log.level === 'COMPLETE') {
-                  return (
-                    <div
-                      key={index}
-                      className="text-surface-bright font-bold pt-2 border-t border-outline/20 flex items-center gap-2"
-                    >
-                      <span className="material-symbols-outlined text-status-verified text-[18px]">
-                        check_circle
-                      </span>
-                      {log.text}
-                    </div>
-                  );
-                }
-
-                const colorClass =
-                  log.type === 'success'
-                    ? 'text-status-success'
-                    : log.type === 'highlight'
-                    ? 'text-primary-fixed'
-                    : log.type === 'muted'
-                    ? 'text-text-muted'
-                    : 'text-secondary-fixed-dim';
-
-                return (
-                  <div key={index} className={colorClass}>
-                    <span className="text-outline mr-2">{log.timestamp}</span>
-                    {log.text}
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Terminal Footer Actions */}
-            <div className="px-4 py-3 bg-surface-dark border-t border-outline/20 flex items-center justify-between">
-              <span className="text-text-muted font-label-code-sm">
-                Duration: {session.metrics.duration} | Exit Code: {session.metrics.exitCode}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleCopyLogs}
-                  className="px-3 py-1.5 rounded bg-surface-container/10 hover:bg-surface-container/20 text-secondary-fixed-dim font-label-code-sm transition-all flex items-center gap-1"
-                >
-                  <span className="material-symbols-outlined text-[14px]">content_copy</span>
-                  Copy Logs
-                </button>
-                <button
-                  onClick={() => setShowTraceModal(true)}
-                  className="px-3 py-1.5 rounded bg-primary text-on-primary font-label-code-sm hover:bg-primary/90 transition-all flex items-center gap-1"
-                >
-                  <span className="material-symbols-outlined text-[14px]">open_in_new</span>
-                  View Full Trace
-                </button>
-              </div>
-            </div>
+            <p className="text-[11px] text-text-muted mt-2 font-mono">
+              Host code execution: FORBIDDEN — untrusted code is never run on the API/worker host, in any fallback.
+            </p>
           </div>
         </div>
       </div>
 
-      {/* Full Trace Modal */}
-      {showTraceModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
-          <div className="bg-surface-dark text-surface-bright rounded-xl max-w-3xl w-full p-6 shadow-2xl border border-outline/30 flex flex-col max-h-[80vh]">
-            <div className="flex items-center justify-between pb-3 mb-3 border-b border-outline/20">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary-fixed text-[20px]">terminal</span>
-                <h3 className="font-headline-sm">gVisor Syscall & Execution Trace Trace Dump</h3>
-              </div>
+      {/* Target patch + actions */}
+      <div className="bg-surface-card border border-border-subtle rounded-2xl p-5 shadow-sm">
+        <h2 className="text-label-ui text-text-secondary uppercase tracking-wider mb-3">Verification Target</h2>
+        {patch ? (
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <p className="text-xs font-semibold text-text-primary">
+                {patch.title}{' '}
+                <span className="font-mono text-[11px] text-text-muted">
+                  ({patch.id} • v{patch.version} • {patch.status})
+                </span>
+              </p>
+              <p className="text-[11px] text-text-muted mt-1 font-mono">
+                {patch.filePath} {patch.linesRange} • bound to finding {patch.vulnerabilityId} • generator{' '}
+                {patch.generator || 'n/a'}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
               <button
-                onClick={() => setShowTraceModal(false)}
-                className="text-secondary-fixed-dim hover:text-surface-bright"
+                onClick={() => handleRun('execution')}
+                disabled={running !== null || !executionAvailable}
+                title={
+                  executionAvailable
+                    ? 'Run in the isolated runner'
+                    : 'Disabled: no verified isolated runner in this deployment — there is no host fallback'
+                }
+                className="px-3.5 py-2 rounded-xl bg-surface-container border border-border-subtle text-xs font-semibold text-text-muted disabled:opacity-40 flex items-center gap-1.5"
               >
-                <span className="material-symbols-outlined text-[20px]">close</span>
+                <span className="material-symbols-outlined text-[16px]">play_disabled</span>
+                <span>Run in Isolated Sandbox</span>
               </button>
-            </div>
-            <div className="p-4 bg-[#0e1614] rounded-lg font-label-code-sm text-xs overflow-y-auto space-y-2 flex-1 text-secondary-fixed-dim">
-              <div>[TRACE INIT] Attached seccomp-bpf filter: 24 syscalls permitted.</div>
-              <div>[SECCOMP TRAP] Blocked: execveat, ptrace, process_vm_writev.</div>
-              <div>[NETNS] Sandboxed network interface lo:127.0.0.1, eth0:10.244.0.14/32.</div>
-              <div>[MEMORY MAP] Initial RSS: 14.2MB, Peak RSS: 48.6MB.</div>
-              {session.terminalLogs.map((l, i) => (
-                <div key={i}>
-                  {l.timestamp} {l.text}
-                </div>
-              ))}
-              <div className="text-status-success font-bold mt-2">
-                [IMMUTABLE PROOF] Digest verified against Secure Enclave public key.
-              </div>
-            </div>
-            <div className="pt-4 flex justify-end">
               <button
-                onClick={() => setShowTraceModal(false)}
-                className="px-4 py-2 rounded-full bg-primary text-on-primary font-label-ui text-xs hover:bg-primary/90"
+                onClick={() => handleRun('static_reanalysis')}
+                disabled={running !== null}
+                className="px-3.5 py-2 rounded-xl bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold shadow-sm disabled:opacity-40 flex items-center gap-1.5"
               >
-                Close Trace
+                <span className="material-symbols-outlined text-[16px]">rule</span>
+                <span>{running === 'static_reanalysis' ? 'Re-analyzing…' : 'Run Static Re-analysis'}</span>
               </button>
             </div>
           </div>
+        ) : (
+          <p className="text-xs text-text-muted">
+            No patch in review context. Request a patch from a finding (needs NVIDIA inference configured) or open a
+            patch from Patch Review — verification always binds to an exact patch + revision digest.
+          </p>
+        )}
+      </div>
+
+      {/* Policy card */}
+      {policy && (
+        <div className="bg-surface-dark rounded-2xl border border-outline/20 p-6 text-surface-bright">
+          <h2 className="text-sm font-bold font-headline-sm text-surface-bright mb-1">Runner Policy (would-be)</h2>
+          <p className="text-[11px] text-secondary-fixed-dim mb-4">
+            The policy a verified isolated runner would enforce. Shown for transparency — it is NOT active in this
+            deployment.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2.5 text-[11px] font-mono">
+            {[
+              ['Runtime', policy.would_be_policy.runtime],
+              ['Identity', policy.would_be_policy.identity],
+              ['Image', policy.would_be_policy.image],
+              ['Filesystem', policy.would_be_policy.filesystem],
+              ['Network', policy.would_be_policy.network],
+              ['Commands', policy.would_be_policy.commands],
+              ['Cleanup', policy.would_be_policy.cleanup],
+              ['Resource caps', Object.entries(policy.would_be_policy.resource_caps)
+                .map(([k, v]) => `${k}=${v}`)
+                .join(', ')],
+            ].map(([k, v]) => (
+              <div key={k as string} className="flex gap-2 border-b border-outline/10 pb-1.5">
+                <span className="text-secondary-fixed-dim w-28 shrink-0">{k}</span>
+                <span className="text-primary-fixed break-all">{v}</span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-secondary-fixed-dim mt-4">
+            No arbitrary command field exists anywhere in this product — commands are backend-defined only.
+          </p>
         </div>
       )}
+
+      {/* Runs + checks */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-1 space-y-2.5">
+          <h2 className="text-label-ui text-text-secondary uppercase tracking-wider">Verification Runs</h2>
+          {runs.length === 0 && (
+            <div className="bg-surface-card border border-dashed border-border-subtle rounded-2xl p-6 text-center text-xs text-text-muted">
+              No runs recorded yet for this patch.
+            </div>
+          )}
+          {runs.map((r) => (
+            <button
+              key={r.id}
+              onClick={() => setSelectedRun(r)}
+              className={`w-full text-left bg-surface-card border rounded-xl p-3.5 transition-all ${
+                selectedRun?.id === r.id ? 'border-primary/60 ring-1 ring-primary/20' : 'border-border-subtle'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono text-text-primary">{r.id.slice(0, 18)}…</span>
+                <span
+                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded font-semibold ${
+                    r.status === 'completed'
+                      ? 'bg-status-success/10 text-status-success'
+                      : r.status === 'verification_unavailable'
+                        ? 'bg-status-high/10 text-status-high'
+                        : 'bg-status-critical/10 text-status-critical'
+                  }`}
+                >
+                  {r.status}
+                </span>
+              </div>
+              <p className="text-[11px] text-text-muted mt-1">
+                {r.mode === 'execution' ? 'Execution (refused)' : 'Static re-analysis'} •{' '}
+                {r.createdAt ? new Date(r.createdAt).toLocaleString() : ''}
+              </p>
+            </button>
+          ))}
+        </div>
+
+        <div className="lg:col-span-2 bg-surface-card border border-border-subtle rounded-2xl p-5 shadow-sm">
+          <h2 className="text-label-ui text-text-secondary uppercase tracking-wider mb-4">
+            Run Detail & Evidence
+          </h2>
+          {!selectedRun && (
+            <p className="text-xs text-text-muted">
+              Select a run to see exactly which checks ran, their outcomes and the evidence digest.
+            </p>
+          )}
+          {selectedRun && (
+            <div className="space-y-4">
+              {selectedRun.status === 'verification_unavailable' && (
+                <div className="bg-status-high/10 border border-status-high/30 rounded-xl p-3.5 text-xs text-status-high leading-relaxed">
+                  {selectedRun.reason}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                {selectedRun.checks.length === 0 && (
+                  <p className="text-xs text-text-muted">No checks ran in this run.</p>
+                )}
+                {selectedRun.checks.map((c, i) => (
+                  <div
+                    key={i}
+                    className="flex items-start gap-3 bg-surface-canvas border border-border-subtle rounded-xl p-3"
+                  >
+                    <span
+                      className={`material-symbols-outlined text-[18px] ${
+                        c.passed ? 'text-status-success' : 'text-status-critical'
+                      }`}
+                    >
+                      {c.passed ? 'check_circle' : 'cancel'}
+                    </span>
+                    <div>
+                      <p className="text-xs font-semibold text-text-primary">{c.name}</p>
+                      <p className="text-[11px] text-text-secondary mt-0.5">{c.detail}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {selectedRun.disclaimer && (
+                <div className="bg-surface-canvas border border-border-subtle rounded-xl p-3.5 text-[11px] text-text-muted leading-relaxed">
+                  {selectedRun.disclaimer}
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 text-[11px] font-mono">
+                <div className="bg-surface-canvas border border-border-subtle rounded-xl p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-text-muted mb-1">Evidence digest</div>
+                  <div className="text-text-primary break-all">{selectedRun.evidenceDigest}</div>
+                </div>
+                <div className="bg-surface-canvas border border-border-subtle rounded-xl p-3">
+                  <div className="text-[9px] uppercase tracking-wider text-text-muted mb-1">Finished</div>
+                  <div className="text-text-primary">
+                    {selectedRun.finishedAt ? new Date(selectedRun.finishedAt).toLocaleString() : '—'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 };

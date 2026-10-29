@@ -1,0 +1,73 @@
+# HealForge — full local deployment (PostgreSQL + FastAPI backend + nginx frontend).
+#
+#   cp .env.example .env    # fill in POSTGRES_PASSWORD and the API key for your selected AI provider
+#   docker compose up --build
+#
+#   Frontend:  http://localhost:8080
+#   Backend:   http://localhost:8000/api/v1/health (migrations run on start)
+#
+# The NVIDIA key is injected from the root .env at RUNTIME (never baked into
+# images). Uploaded source is analyzed statically in the backend container —
+# it is never executed anywhere (RUNNER_VERIFIED=false keeps verification
+# execution disabled unless an isolated runner is deployed and proven).
+
+name: healforge
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-healforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-healforge}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-healforge} -d ${POSTGRES_DB:-healforge}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-healforge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-healforge}
+      AI_PROVIDER: ${AI_PROVIDER:-nebius}
+      NEBIUS_API_KEY: ${NEBIUS_API_KEY:-}
+      NEBIUS_BASE_URL: ${NEBIUS_BASE_URL:-https://api.tokenfactory.nebius.com/v1}
+      NEBIUS_MODEL: ${NEBIUS_MODEL:-nvidia/Llama-3.1-Nemotron-70B-Instruct-HF}
+      NEBIUS_TIMEOUT_SECONDS: ${NEBIUS_TIMEOUT_SECONDS:-60}
+      NEBIUS_MAX_OUTPUT_TOKENS: ${NEBIUS_MAX_OUTPUT_TOKENS:-2048}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      NVIDIA_BASE_URL: ${NVIDIA_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      NVIDIA_TIMEOUT_SECONDS: ${NVIDIA_TIMEOUT_SECONDS:-60}
+      NVIDIA_MAX_OUTPUT_TOKENS: ${NVIDIA_MAX_OUTPUT_TOKENS:-2048}
+      NVIDIA_MODEL_ID: ${NVIDIA_MODEL_ID:-nvidia/nemotron-3-super-120b-a12b}
+      HEALFORGE_SINGLE_USER: ${HEALFORGE_SINGLE_USER:-false}
+      HEALFORGE_ENV: ${HEALFORGE_ENV:-production}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-168}
+      RUNNER_VERIFIED: ${RUNNER_VERIFIED:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      MAX_ARCHIVE_BYTES: ${MAX_ARCHIVE_BYTES:-20971520}
+      MAX_ARCHIVE_ENTRIES: ${MAX_ARCHIVE_ENTRIES:-500}
+      MAX_FILE_BYTES: ${MAX_FILE_BYTES:-262144}
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:

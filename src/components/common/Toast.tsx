@@ -61,7 +61,7 @@ export const Toast: React.FC<ToastProps> = ({ toast, onClose }) => {
           <p className="text-body-sm text-text-secondary mt-1">{toast.message}</p>
           <div className="mt-2 text-[11px] font-label-code-sm text-text-muted flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-primary" />
-            Simulated Workbench Operation • No production changes executed
+            HealForge Workbench • Operations persist server-side
           </div>
         </div>
       </div>

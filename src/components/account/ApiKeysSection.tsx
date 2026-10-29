@@ -20,9 +20,9 @@ export const ApiKeysSection: React.FC<ApiKeysSectionProps> = ({
   const [revealedName, setRevealedName] = useState('');
   const [isAddWebhookOpen, setIsAddWebhookOpen] = useState(false);
 
-  const handleCreateKey = (name: string, scopes: string[], expiryDays: number) => {
-    const result = accountService.createApiKey(name, scopes, expiryDays);
-    setRevealedSecret(result.rawSecret);
+  const handleCreateKey = async (name: string, scopes: string[], expiryDays: number) => {
+    const result = await accountService.createApiKey(name, scopes, expiryDays);
+    setRevealedSecret(result.rawSecret ?? '');
     setRevealedName(name);
     setIsRevealKeyOpen(true);
     onTriggerToast({
@@ -32,8 +32,8 @@ export const ApiKeysSection: React.FC<ApiKeysSectionProps> = ({
     });
   };
 
-  const handleRevokeKey = (keyId: string) => {
-    const res = accountService.revokeApiKey(keyId);
+  const handleRevokeKey = async (keyId: string) => {
+    const res = await accountService.revokeApiKey(keyId);
     onTriggerToast({
       type: res.success ? 'success' : 'warning',
       title: res.success ? 'API Key Revoked' : 'Error',
@@ -41,8 +41,8 @@ export const ApiKeysSection: React.FC<ApiKeysSectionProps> = ({
     });
   };
 
-  const handleAddWebhook = (url: string, events: string[]) => {
-    const res = accountService.createWebhook(url, events);
+  const handleAddWebhook = async (url: string, events: string[]) => {
+    const res = await accountService.createWebhook(url, events);
     onTriggerToast({
       type: res.success ? 'success' : 'warning',
       title: res.success ? 'Webhook Created' : 'Failed',
@@ -50,8 +50,8 @@ export const ApiKeysSection: React.FC<ApiKeysSectionProps> = ({
     });
   };
 
-  const handleDeleteWebhook = (id: string) => {
-    const res = accountService.deleteWebhook(id);
+  const handleDeleteWebhook = async (id: string) => {
+    const res = await accountService.deleteWebhook(id);
     onTriggerToast({
       type: res.success ? 'info' : 'warning',
       title: 'Webhook Deleted',
@@ -226,8 +226,10 @@ export const ApiKeysSection: React.FC<ApiKeysSectionProps> = ({
                     </span>
                   ))}
                 </div>
-                <div className="text-[11px] font-mono">
-                  Signing Secret: {wh.signingSecret}
+                <div className="text-[11px] font-mono text-text-muted">
+                  {wh.deliveryConfigured === false
+                    ? 'Registered — delivery worker not configured (events recorded, not delivered)'
+                    : 'Registered'}
                 </div>
               </div>
             </div>

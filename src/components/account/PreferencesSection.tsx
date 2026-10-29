@@ -19,7 +19,7 @@ export const PreferencesSection: React.FC<PreferencesSectionProps> = ({
       [key]: value,
     };
     setPreferences(updated);
-    accountService.updateUserPreferences(updated);
+    accountService.updatePreferences(updated);
     onTriggerToast({
       type: 'success',
       title: 'Preference Saved',
