@@ -103,9 +103,7 @@ def login(body: LoginRequest, db: DbDep, request: Request, response: Response) -
                 {"email": email_clean, "password": body.password},
             ).fetchone()
             if user_row:
-                user = db.query(UserAccount).filter(UserAccount.id == user_row.id).first()
-                if not user:
-                    user = UserAccount(id=user_row.id, email=user_row.email)
+                user = UserAccount(id=user_row.id, email=user_row.email)
         except Exception:
             user = None
 
@@ -151,6 +149,14 @@ def register(body: RegisterRequest, db: DbDep, request: Request, response: Respo
         raise api_error(422, "invalid_email", "Enter a valid email address.")
     if not re.fullmatch(r"[a-zA-Z0-9_.-]+", body.username):
         raise api_error(422, "invalid_username", "Username may contain letters, digits, dot, dash, underscore.")
+
+    is_sqlite = str(db.bind.url).startswith("sqlite")
+    if not is_sqlite:
+        raise api_error(
+            400,
+            "supabase_auth_required",
+            "Direct backend registration is disabled when targeting Supabase PostgreSQL. Please authenticate or register via Supabase Auth.",
+        )
 
     if db.query(UserAccount).filter(UserAccount.email == email_clean).first() or db.query(Profile).filter(Profile.email == email_clean).first():
         raise api_error(409, "email_taken", "An account with this email already exists.")

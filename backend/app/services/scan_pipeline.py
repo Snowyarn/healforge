@@ -456,18 +456,21 @@ def run_scan(db: Session, scan_id: str) -> None:
         try:
             from ..models import Notification
             from ..models.base import new_id
-            db.add(
-                Notification(
-                    id=new_id("ntf"),
-                    user_id=ws.owner_user_id,
-                    title=f"Scan completed: {project.name if project else 'Project'}",
-                    message=f"{job.scan_type} found {job.findings_count} issues "
-                    f"({job.critical_count} critical, {job.high_count} high).",
-                    icon="radar",
-                    link_screen="scan-history",
-                )
+            note = Notification(
+                id=new_id("ntf"),
+                user_id=ws.owner_user_id,
+                title=f"Scan completed: {project.name if project else 'Project'}",
+                message=f"{job.scan_type} found {job.findings_count} issues "
+                f"({job.critical_count} critical, {job.high_count} high).",
+                icon="radar",
+                link_screen="scan-history",
             )
-            db.commit()
+            if str(db.bind.url).startswith("sqlite"):
+                db.add(note)
+                db.commit()
+            else:
+                from ..api.routers.records import record_in_memory_notification
+                record_in_memory_notification(note)
         except Exception:
             db.rollback()
 

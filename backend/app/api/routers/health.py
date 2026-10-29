@@ -7,8 +7,8 @@ from datetime import UTC, datetime
 from fastapi import APIRouter
 from sqlalchemy import text
 
+from ... import db
 from ...config import settings
-from ...db import engine
 from ...services import ai_provider, nvidia
 
 router = APIRouter(tags=["health"])
@@ -18,7 +18,7 @@ router = APIRouter(tags=["health"])
 def health() -> dict:
     db_ok = False
     try:
-        with engine.connect() as conn:
+        with db.engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         db_ok = True
     except Exception:  # noqa: BLE001

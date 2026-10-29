@@ -15,6 +15,8 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # default is fail-closed: HEALFORGE_SINGLE_USER defaults to false).
 os.environ.setdefault("HEALFORGE_SINGLE_USER", "true")
 os.environ.setdefault("HEALFORGE_ENV", "local")
+os.environ["NVIDIA_API_KEY"] = ""
+os.environ["NEBIUS_API_KEY"] = ""
 
 
 @pytest.fixture(autouse=True)

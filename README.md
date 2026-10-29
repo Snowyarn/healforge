@@ -33,12 +33,11 @@ flowchart TD
         NvidiaNIM["NVIDIA NIM Catalog (Alternative)"]
     end
 
-    subgraph Database["Database Tier (Dual Schema Strategy)"]
-        subgraph SupabaseDB["Supabase PostgreSQL (Hosted / Local)"]
+    subgraph Database["Authoritative Database Tier"]
+        subgraph SupabaseDB["Supabase PostgreSQL (Hosted healforge-dev / Local)"]
             PublicSchema["public schema: 15 Deployed Tables<br>(RLS Policies, UUIDs, Triggers, Immutability)"]
-            BackendSchema["healforge_backend schema: 24 Tables<br>(Isolated SQLAlchemy/Alembic Models)"]
         end
-        LocalSQLite[("SQLite Dev Database<br>(WAL Mode, local fallback)")]
+        LocalSQLite[("SQLite Test Runner Database<br>(WAL Mode, local isolated pytest)")]
     end
 
     UI --> ApiClient
@@ -90,19 +89,28 @@ Open [http://localhost:3000](http://localhost:3000) in your browser. The Vite de
 
 ---
 
-## 2. Database Architecture & Schema Isolation
+## 2. Database Architecture & Supabase Integration
 
-HealForge safely integrates two database layers without collision:
+HealForge uses the **authoritative Supabase PostgreSQL foundation (`public` schema)** as its single source of truth:
 
-1. **Supabase PostgreSQL Foundation (`public` schema):**
-   - **15 Deployed Tables:** `profiles`, `workspaces`, `workspace_members`, `repositories`, `integration_connections`, `analyses`, `findings`, `analysis_findings`, `patches`, `patch_versions`, `patch_reviews`, `sandbox_runs`, `verification_checks`, `audit_logs`, `saved_reports`.
-   - **Guarantees:** RFC 4122 standard UUIDs, database-level Row Level Security (RLS), immutability triggers on audit logs and patch version diffs, and compound cross-tenant foreign key constraints.
+1. **Authoritative Supabase PostgreSQL Schema (`public` schema):**
+   - **15 Canonical Tables:** `profiles`, `workspaces`, `workspace_members`, `repositories`, `integration_connections`, `analyses`, `findings`, `analysis_findings`, `patches`, `patch_versions`, `patch_reviews`, `sandbox_runs`, `verification_checks`, `audit_logs`, `saved_reports`.
+   - **Guarantees:** RFC 4122 standard UUIDs, workspace tenancy isolation, immutability triggers on audit logs and patch version diffs, and compound cross-tenant foreign key constraints.
    - **Pre-flight Validation:** 99 static DDL and contract tests pass (`npm run test:db`).
 
-2. **FastAPI Engine Storage (`healforge_backend` schema / SQLite WAL):**
-   - **Isolated Schema:** When connecting to PostgreSQL (`DATABASE_URL=postgresql+psycopg://...`), the backend automatically uses `DATABASE_SCHEMA=healforge_backend` (`search_path=healforge_backend`). Alembic creates its version table at `healforge_backend.alembic_version`.
-   - **Zero Schema Leakage:** Supabase's public PostgREST Data API only exposes `public`, guaranteeing that internal backend worker tables are never accidentally exposed through public APIs.
-   - **Local Development:** When `DATABASE_URL` is a SQLite URI (`sqlite:///./healforge.db`), WAL mode ensures non-blocking concurrent reads during active background scans.
+2. **Database Setup Options:**
+   - **Path A — Local Supabase CLI (Recommended Local Dev):** Run `npx supabase start` to launch local Supabase with the 15 canonical tables on `127.0.0.1:54322`. Set `DATABASE_SCHEMA=public` and `SKIP_ALEMBIC_MIGRATIONS=true`.
+   - **Path B — Hosted Supabase (`healforge-dev`):** Connect directly to the hosted Supabase connection pooler with `DATABASE_SCHEMA=public` and `SKIP_ALEMBIC_MIGRATIONS=true`.
+   - **Path C — Local SQLite Dev (Fast, No Docker):** Set `DATABASE_URL=sqlite:///./healforge.db` and run `alembic upgrade head` for standalone local development and automated pytest test suites.
+   - **Path D — Standalone Docker Compose (Built-in Postgres Container):** If running without Supabase, set `DATABASE_SCHEMA=healforge_backend` and `SKIP_ALEMBIC_MIGRATIONS=false` to let Alembic populate the isolated development container.
+
+> [!NOTE]
+> **Migration Safety & Hosted Database Protection:**
+> Legacy Alembic migrations are strictly suppressed when targeting the Supabase database (`SKIP_ALEMBIC_MIGRATIONS=true` or `DATABASE_SCHEMA=public`). Both `backend/docker-entrypoint.sh` and `backend/alembic/env.py` abort migration execution to prevent mutating the managed Supabase schema.
+
+> [!WARNING]
+> **RLS Verification Status (Hosted Supabase Pending):**
+> Tenant boundaries and workspace authorization are strictly enforced at the application layer across all routes and database queries. However, **database-level Row Level Security (RLS) enforcement against the remote hosted Supabase database remains pending live verification**, as effective RLS depends on the specific connection role privileges configured on the hosted Supabase pooler (e.g., non-superuser roles without `BYPASSRLS`). Local tests confirm application-level isolation but do not certify remote database-level policy enforcement.
 
 ---
 
@@ -137,7 +145,7 @@ sequenceDiagram
     participant FE as React Frontend (:3000)
     participant BE as FastAPI Backend (:8001)
     participant AI as Nebius Token Factory (NVIDIA Nemotron)
-    participant DB as SQLite / PostgreSQL (healforge_backend)
+    participant DB as Supabase PostgreSQL / SQLite
 
     User->>FE: Upload project ZIP archive
     FE->>BE: POST /api/v1/projects/{id}/sources
@@ -184,17 +192,34 @@ sequenceDiagram
 
 ---
 
-## 6. Environment Variables Reference
+## 6. Supabase Architecture, Migration Safety & Durability Notes
+
+### Authoritative Database Tier
+- **Hosted Supabase `healforge-dev` (`public` schema)** is the single source of truth for the project.
+- The 15 canonical tables (`profiles`, `workspaces`, `workspace_members`, `repositories`, `integration_connections`, `analyses`, `findings`, `analysis_findings`, `patches`, `patch_versions`, `patch_reviews`, `sandbox_runs`, `verification_checks`, `audit_logs`, `saved_reports`) hold all persistent domain data, relational integrity constraints, and Row Level Security (RLS) policies.
+- **Migration Safety:** The backend's legacy Alembic migrations are strictly suppressed when targeting the Supabase database (`SKIP_ALEMBIC_MIGRATIONS=true` or `DATABASE_SCHEMA=public`). Both `backend/docker-entrypoint.sh` and `backend/alembic/env.py` contain programmatic guards to prevent mutating or duplicating the authoritative Supabase schema.
+
+### Durability & In-Memory Adapters
+To maintain 100% route functionality while avoiding unmapped tables on PostgreSQL:
+- **Durable via Supabase:** Workspaces, Members & RBAC, Repositories, Analyses/Scans, Canonical Findings, Patches & Versions, Reviews, Verification Checks, Audit Logs, Saved Reports, and **Webhooks** (persisted in `public.integration_connections` with `provider="custom_webhook"`).
+- **Process-Local / Ephemeral State:** Ephemeral non-core records (**API keys**, **Notifications**, **Bug Reports**, and **Idempotency records**) utilize in-memory storage adapters on PostgreSQL. These features operate normally during runtime but do not persist across container restarts or synchronize across multiple independent backend replicas. A production durable implementation would require schema additions or external caching (e.g. Redis).
+
+---
+
+## 7. Environment Variables Reference
 
 | Variable | Target Component | Default / Example | Purpose |
 |:---|:---|:---|:---|
-| `DATABASE_URL` | Backend | `sqlite:///./healforge.db` | Connection string (SQLite local, or `postgresql+psycopg://...` in production). |
-| `DATABASE_SCHEMA` | Backend | `healforge_backend` | Schema isolation for backend models on PostgreSQL. |
-| `AI_PROVIDER` | Backend | `nebius` | Active AI provider (`nebius` or `nvidia`). |
-| `NEBIUS_API_KEY` | Backend | *(empty)* | Official Nebius Token Factory API key. |
+| `DATABASE_URL` | Backend | `postgresql+psycopg://...` | Connection string to Supabase PostgreSQL (or SQLite for local tests). |
+| `DATABASE_SCHEMA` | Backend | `public` | Schema for Supabase 15 authoritative application tables. |
+| `SKIP_ALEMBIC_MIGRATIONS` | Backend | `true` | Prevents local Alembic migrations from mutating the Supabase schema. |
+| `SUPABASE_URL` | Backend / Frontend | `http://127.0.0.1:54321` | Supabase platform URL (hosted or local). |
+| `SUPABASE_JWT_SECRET` | Backend | *(project secret)* | Supabase JWT signing secret for HS256 auth verification. |
+| `AI_PROVIDER` | Backend | `nebius` | Active AI provider (`nebius` default or `nvidia` alternative). |
+| `NEBIUS_API_KEY` | Backend | *(empty)* | Nebius Token Factory API key (server-side secret). |
 | `NEBIUS_BASE_URL` | Backend | `https://api.tokenfactory.nebius.com/v1` | Nebius Token Factory endpoint. |
 | `NEBIUS_MODEL` | Backend | `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF` | NVIDIA open-source model identifier on Nebius. |
-| `NVIDIA_API_KEY` | Backend | *(empty)* | Optional alternative NVIDIA NIM key. |
+| `NVIDIA_API_KEY` | Backend | *(empty)* | Optional alternative NVIDIA NIM catalog key (server-side secret). |
 | `HEALFORGE_SINGLE_USER`| Backend | `false` | Development mode; fail-closed in production. |
 | `HEALFORGE_ENV` | Backend | `local` | `local` or `production` (enforces startup security guards). |
 | `CORS_ORIGINS` | Backend | `http://localhost:3000` | Exact allowed frontend origins. |
@@ -202,7 +227,7 @@ sequenceDiagram
 
 ---
 
-## 7. Quality Gates & Test Results
+## 8. Quality Gates & Test Results
 
 Run all test suites and quality gates in a single command:
 

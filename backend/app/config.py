@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Database (Supabase PostgreSQL is the authoritative data source)
     database_url: str = "postgresql+psycopg://postgres:postgres@127.0.0.1:54322/postgres"
     database_schema: str = "public"
+    skip_alembic_migrations: bool = True
 
     # Supabase Platform Connection
     supabase_url: str = "http://127.0.0.1:54321"

@@ -687,8 +687,42 @@ def account_state_dto(
     sessions = getattr(user, "_sessions", [])
     keys = getattr(user, "_keys", [])
     webhooks = getattr(workspace, "_webhooks", [])
-    team = db.query(TeamMember).filter(TeamMember.workspace_id == workspace.id).order_by(TeamMember.created_at).all()
-    integrations = db.query(IntegrationConfig).filter(IntegrationConfig.workspace_id == workspace.id).all()
+    is_sqlite = str(db.bind.url).startswith("sqlite")
+    if is_sqlite:
+        team = db.query(TeamMember).filter(TeamMember.workspace_id == workspace.id).order_by(TeamMember.created_at).all()
+        integrations = db.query(IntegrationConfig).filter(IntegrationConfig.workspace_id == workspace.id).all()
+    else:
+        from ..models import IntegrationConnection, Profile, WorkspaceMember
+        wms = db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == workspace.id).order_by(WorkspaceMember.created_at).all()
+        user_ids = [wm.user_id for wm in wms]
+        profiles = {p.id: p for p in db.query(Profile).filter(Profile.id.in_(user_ids)).all()} if user_ids else {}
+        team = []
+        for wm in wms:
+            p = profiles.get(wm.user_id)
+            team.append(type("TeamMemberView", (), {
+                "id": str(wm.id),
+                "name": (p.display_name or p.full_name or "Member") if p else "Member",
+                "email": p.email if p else "unknown@healforge.local",
+                "role": wm.role.replace("_", " ").title(),
+                "status": wm.status.capitalize(),
+                "created_at": wm.created_at,
+                "user_id": str(wm.user_id),
+                "revoked_at": None,
+                "invite_expires_at": None,
+            })())
+        ics = db.query(IntegrationConnection).filter(IntegrationConnection.workspace_id == workspace.id).all()
+        integrations = []
+        for ic in ics:
+            integrations.append(type("IntegrationView", (), {
+                "id": str(ic.id),
+                "workspace_id": str(ic.workspace_id),
+                "provider": ic.provider,
+                "name": ic.name,
+                "status": ic.status,
+                "created_at": ic.created_at,
+                "updated_at": ic.updated_at,
+                "config": ic.metadata_,
+            })())
     from ..models import AuditEvent
 
     activity = (

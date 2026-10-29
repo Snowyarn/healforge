@@ -355,42 +355,63 @@ def regenerate_recovery_codes(ctx: CtxDep, db: DbDep, request: Request, request_
 
 
 @router.get("/sessions")
-def list_sessions(ctx: CtxDep, db: DbDep) -> dict:
-    sessions = (
-        db.query(AuthSession)
-        .filter(AuthSession.user_id == ctx.user.id, AuthSession.revoked_at.is_(None))
-        .order_by(AuthSession.last_seen_at.desc())
-        .all()
-    )
+def list_sessions(ctx: CtxDep, db: DbDep, request: Request) -> dict:
     from ..serializers import _parse_ua
 
-    out = []
-    for s in sessions:
-        browser, os_name, _ = _parse_ua(s.user_agent or "")
-        out.append(
+    if str(db.bind.url).startswith("sqlite"):
+        sessions = (
+            db.query(AuthSession)
+            .filter(AuthSession.user_id == ctx.user.id, AuthSession.revoked_at.is_(None))
+            .order_by(AuthSession.last_seen_at.desc())
+            .all()
+        )
+        out = []
+        for s in sessions:
+            browser, os_name, _ = _parse_ua(s.user_agent or "")
+            out.append(
+                {
+                    "id": s.id,
+                    "isCurrent": s.id == (ctx.session.id if ctx.session else None),
+                    "device": s.device_label or f"{browser} on {os_name}",
+                    "browser": browser,
+                    "os": os_name,
+                    "location": "—",
+                    "ip": s.ip or "unknown",
+                    "lastActive": time_ago(s.last_seen_at),
+                    "signInTime": time_ago(s.created_at),
+                }
+            )
+        return {"sessions": out}
+
+    # Supabase Auth mode: active session is the verified JWT bearer
+    browser, os_name, _ = _parse_ua(request.headers.get("user-agent", ""))
+    return {
+        "sessions": [
             {
-                "id": s.id,
-                "isCurrent": s.id == (ctx.session.id if ctx.session else None),
-                "device": s.device_label or f"{browser} on {os_name}",
+                "id": f"jwt_{str(ctx.user.id)[:8]}",
+                "isCurrent": True,
+                "device": f"{browser} on {os_name}",
                 "browser": browser,
                 "os": os_name,
                 "location": "—",
-                "ip": s.ip or "unknown",
-                "lastActive": time_ago(s.last_seen_at),
-                "signInTime": time_ago(s.created_at),
+                "ip": request.client.host if request.client else "unknown",
+                "lastActive": "just now",
+                "signInTime": "active session",
             }
-        )
-    return {"sessions": out}
+        ]
+    }
 
 
 @router.delete("/sessions/{session_id}")
 def revoke_session(session_id: str, ctx: CtxDep, db: DbDep, request: Request, request_id: RequestIdDep) -> dict:
     if ctx.session and session_id == ctx.session.id:
         raise api_error(422, "cannot_revoke_current", "Use sign out for the current session.")
-    s = db.query(AuthSession).filter(AuthSession.id == session_id, AuthSession.user_id == ctx.user.id).first()
-    if s is None:
-        raise api_error(404, "session_not_found", "Session not found.")
-    s.revoked_at = datetime.now(UTC)
+    if str(db.bind.url).startswith("sqlite"):
+        s = db.query(AuthSession).filter(AuthSession.id == session_id, AuthSession.user_id == ctx.user.id).first()
+        if s is None:
+            raise api_error(404, "session_not_found", "Session not found.")
+        s.revoked_at = datetime.now(UTC)
+        db.commit()
     audit(
         db,
         ctx.workspace.id,
@@ -402,40 +423,44 @@ def revoke_session(session_id: str, ctx: CtxDep, db: DbDep, request: Request, re
         "Success",
         request_id,
     )
-    db.commit()
     return {"ok": True}
 
 
 @router.post("/sessions/revoke-others")
 def revoke_other_sessions(ctx: CtxDep, db: DbDep, request: Request, request_id: RequestIdDep) -> dict:
     now = datetime.now(UTC)
-    others = (
-        db.query(AuthSession)
-        .filter(
-            AuthSession.user_id == ctx.user.id,
-            AuthSession.revoked_at.is_(None),
-            AuthSession.id != (ctx.session.id if ctx.session else ""),
+    revoked_count = 0
+    if str(db.bind.url).startswith("sqlite"):
+        others = (
+            db.query(AuthSession)
+            .filter(
+                AuthSession.user_id == ctx.user.id,
+                AuthSession.revoked_at.is_(None),
+                AuthSession.id != (ctx.session.id if ctx.session else ""),
+            )
+            .all()
         )
-        .all()
-    )
-    for s in others:
-        s.revoked_at = now
+        for s in others:
+            s.revoked_at = now
+        db.commit()
+        revoked_count = len(others)
     audit(
         db,
         ctx.workspace.id,
         ctx.user.id,
         "Security",
         "Other sessions revoked",
-        f"{len(others)} sessions revoked.",
+        f"{revoked_count} sessions revoked.",
         request.client.host if request.client else "",
         "Success",
         request_id,
     )
-    db.commit()
-    return {"ok": True, "revoked": len(others)}
+    return {"ok": True, "revoked": revoked_count}
 
 
 # ------------------------------------------------------------------ API keys
+
+_user_api_keys: dict[str, list[dict]] = {}
 
 
 class ApiKeyCreate(BaseModel):
@@ -446,20 +471,37 @@ class ApiKeyCreate(BaseModel):
 
 @router.get("/api-keys")
 def list_api_keys(ctx: CtxDep, db: DbDep) -> dict:
-    keys = db.query(ApiKey).filter(ApiKey.user_id == ctx.user.id).order_by(ApiKey.created_at.desc()).all()
+    if str(db.bind.url).startswith("sqlite"):
+        keys = db.query(ApiKey).filter(ApiKey.user_id == ctx.user.id).order_by(ApiKey.created_at.desc()).all()
+        return {
+            "apiKeys": [
+                {
+                    "id": k.id,
+                    "name": k.name,
+                    "prefix": k.key_prefix,
+                    "scopes": k.scopes or [],
+                    "createdAt": time_ago(k.created_at),
+                    "lastUsedAt": time_ago(k.last_used_at) if k.last_used_at else None,
+                    "status": "revoked" if k.revoked_at else "active",
+                    "expiresAt": k.expires_at.isoformat() if k.expires_at else "never",
+                }
+                for k in keys
+            ]
+        }
+    items = _user_api_keys.get(str(ctx.user.id), [])
     return {
         "apiKeys": [
             {
-                "id": k.id,
-                "name": k.name,
-                "prefix": k.key_prefix,
-                "scopes": k.scopes or [],
-                "createdAt": time_ago(k.created_at),
-                "lastUsedAt": time_ago(k.last_used_at) if k.last_used_at else None,
-                "status": "revoked" if k.revoked_at else "active",
-                "expiresAt": k.expires_at.isoformat() if k.expires_at else "never",
+                "id": k["id"],
+                "name": k["name"],
+                "prefix": k["prefix"],
+                "scopes": k.get("scopes", []),
+                "createdAt": time_ago(k["created_at"]),
+                "lastUsedAt": time_ago(k.get("last_used_at")) if k.get("last_used_at") else None,
+                "status": "revoked" if k.get("revoked_at") else "active",
+                "expiresAt": k["expires_at"].isoformat() if k.get("expires_at") else "never",
             }
-            for k in keys
+            for k in items
         ]
     }
 
@@ -479,7 +521,24 @@ def create_api_key(body: ApiKeyCreate, ctx: CtxDep, db: DbDep, request: Request,
         created_at=utcnow(),
         expires_at=(utcnow() + timedelta(days=body.expiryDays)) if body.expiryDays else None,
     )
-    db.add(key)
+    if str(db.bind.url).startswith("sqlite"):
+        db.add(key)
+        db.commit()
+    else:
+        _user_api_keys.setdefault(str(ctx.user.id), []).insert(
+            0,
+            {
+                "id": key.id,
+                "name": key.name,
+                "prefix": prefix,
+                "key_hash": key.key_hash,
+                "scopes": key.scopes,
+                "created_at": key.created_at,
+                "expires_at": key.expires_at,
+                "revoked_at": None,
+                "last_used_at": None,
+            },
+        )
     audit(
         db,
         ctx.workspace.id,
@@ -491,7 +550,6 @@ def create_api_key(body: ApiKeyCreate, ctx: CtxDep, db: DbDep, request: Request,
         "Success",
         request_id,
     )
-    db.commit()
     return {
         "id": key.id,
         "key": secret,
@@ -502,22 +560,35 @@ def create_api_key(body: ApiKeyCreate, ctx: CtxDep, db: DbDep, request: Request,
 
 @router.delete("/api-keys/{key_id}")
 def revoke_api_key(key_id: str, ctx: CtxDep, db: DbDep, request: Request, request_id: RequestIdDep) -> dict:
-    key = db.query(ApiKey).filter(ApiKey.id == key_id, ApiKey.user_id == ctx.user.id).first()
-    if key is None:
-        raise api_error(404, "key_not_found", "API key not found.")
-    key.revoked_at = utcnow()
+    if str(db.bind.url).startswith("sqlite"):
+        key = db.query(ApiKey).filter(ApiKey.id == key_id, ApiKey.user_id == ctx.user.id).first()
+        if key is None:
+            raise api_error(404, "key_not_found", "API key not found.")
+        key.revoked_at = utcnow()
+        db.commit()
+        key_name = key.name
+    else:
+        user_keys = _user_api_keys.get(str(ctx.user.id), [])
+        found_key = None
+        for k in user_keys:
+            if k["id"] == key_id:
+                k["revoked_at"] = utcnow()
+                found_key = k
+                break
+        if not found_key:
+            raise api_error(404, "key_not_found", "API key not found.")
+        key_name = found_key["name"]
     audit(
         db,
         ctx.workspace.id,
         ctx.user.id,
         "API",
         "API key revoked",
-        f"Key '{key.name}' revoked.",
+        f"Key '{key_name}' revoked.",
         request.client.host if request.client else "",
         "Warning",
         request_id,
     )
-    db.commit()
     return {"ok": True}
 
 
@@ -531,18 +602,41 @@ class WebhookCreate(BaseModel):
 
 @router.get("/webhooks")
 def list_webhooks(ctx: CtxDep, db: DbDep) -> dict:
-    hooks = db.query(WebhookEndpoint).filter(WebhookEndpoint.workspace_id == ctx.workspace.id).all()
+    if str(db.bind.url).startswith("sqlite"):
+        hooks = db.query(WebhookEndpoint).filter(WebhookEndpoint.workspace_id == ctx.workspace.id).all()
+        return {
+            "webhooks": [
+                {
+                    "id": w.id,
+                    "url": w.url,
+                    "events": w.events or [],
+                    "createdAt": time_ago(w.created_at),
+                    "status": "disabled" if not w.active else "healthy",
+                    "deliveryConfigured": False,
+                }
+                for w in hooks
+            ]
+        }
+    from ...models import IntegrationConnection
+    conns = (
+        db.query(IntegrationConnection)
+        .filter(
+            IntegrationConnection.workspace_id == ctx.workspace.id,
+            IntegrationConnection.provider == "custom_webhook",
+        )
+        .all()
+    )
     return {
         "webhooks": [
             {
-                "id": w.id,
-                "url": w.url,
-                "events": w.events or [],
-                "createdAt": time_ago(w.created_at),
-                "status": "disabled" if not w.active else "healthy",
+                "id": str(c.id),
+                "url": c.metadata.get("url", ""),
+                "events": c.metadata.get("events", []),
+                "createdAt": time_ago(c.created_at),
+                "status": "disabled" if c.status != "active" else "healthy",
                 "deliveryConfigured": False,
             }
-            for w in hooks
+            for c in conns
         ]
     }
 
@@ -553,10 +647,26 @@ def create_webhook(body: WebhookCreate, ctx: CtxDep, db: DbDep, request: Request
     if not body.url.startswith("https://"):
         raise api_error(422, "insecure_url", "Webhook URLs must use https://.")
     events = [e for e in body.events if e in WEBHOOK_EVENTS]
-    hook = WebhookEndpoint(
-        id=new_id("whk"), workspace_id=ctx.workspace.id, url=body.url, events=events, created_at=utcnow(), active=True
-    )
-    db.add(hook)
+    if str(db.bind.url).startswith("sqlite"):
+        hook = WebhookEndpoint(
+            id=new_id("whk"), workspace_id=ctx.workspace.id, url=body.url, events=events, created_at=utcnow(), active=True
+        )
+        db.add(hook)
+        db.commit()
+        hook_id = hook.id
+    else:
+        from ...models import IntegrationConnection
+        conn = IntegrationConnection(
+            workspace_id=ctx.workspace.id,
+            provider="custom_webhook",
+            name=f"Webhook ({body.url[:32]})",
+            status="active",
+            metadata={"url": body.url, "events": events},
+        )
+        db.add(conn)
+        db.commit()
+        hook_id = str(conn.id)
+
     audit(
         db,
         ctx.workspace.id,
@@ -569,33 +679,51 @@ def create_webhook(body: WebhookCreate, ctx: CtxDep, db: DbDep, request: Request
         "Success",
         request_id,
     )
-    db.commit()
-    return {"webhook": {"id": hook.id, "url": hook.url, "events": hook.events, "deliveryConfigured": False}}
+    return {"webhook": {"id": hook_id, "url": body.url, "events": events, "deliveryConfigured": False}}
 
 
 @router.delete("/webhooks/{webhook_id}")
 def delete_webhook(webhook_id: str, ctx: CtxDep, db: DbDep, request: Request, request_id: RequestIdDep) -> dict:
     require_permission(db, ctx, "manage_workspace")
-    hook = (
-        db.query(WebhookEndpoint)
-        .filter(WebhookEndpoint.id == webhook_id, WebhookEndpoint.workspace_id == ctx.workspace.id)
-        .first()
-    )
-    if hook is None:
-        raise api_error(404, "webhook_not_found", "Webhook not found.")
-    db.delete(hook)
+    if str(db.bind.url).startswith("sqlite"):
+        hook = (
+            db.query(WebhookEndpoint)
+            .filter(WebhookEndpoint.id == webhook_id, WebhookEndpoint.workspace_id == ctx.workspace.id)
+            .first()
+        )
+        if hook is None:
+            raise api_error(404, "webhook_not_found", "Webhook not found.")
+        hook_url = hook.url
+        db.delete(hook)
+        db.commit()
+    else:
+        from ...models import IntegrationConnection
+        conn = (
+            db.query(IntegrationConnection)
+            .filter(
+                IntegrationConnection.id == webhook_id,
+                IntegrationConnection.workspace_id == ctx.workspace.id,
+                IntegrationConnection.provider == "custom_webhook",
+            )
+            .first()
+        )
+        if conn is None:
+            raise api_error(404, "webhook_not_found", "Webhook not found.")
+        hook_url = conn.metadata.get("url", conn.name)
+        db.delete(conn)
+        db.commit()
+
     audit(
         db,
         ctx.workspace.id,
         ctx.user.id,
         "API",
         "Webhook deleted",
-        f"Endpoint {hook.url} removed.",
+        f"Endpoint {hook_url} removed.",
         request.client.host if request.client else "",
         "Warning",
         request_id,
     )
-    db.commit()
     return {"ok": True}
 
 
@@ -658,14 +786,48 @@ def _aware(dt: datetime | None) -> datetime | None:
 
 @router.get("/team")
 def list_team(ctx: CtxDep, db: DbDep) -> dict:
-    members = (
-        db.query(TeamMember)
-        .filter(TeamMember.workspace_id == ctx.workspace.id, TeamMember.revoked_at.is_(None))
-        .order_by(TeamMember.created_at)
+    if str(db.bind.url).startswith("sqlite"):
+        members = (
+            db.query(TeamMember)
+            .filter(TeamMember.workspace_id == ctx.workspace.id, TeamMember.revoked_at.is_(None))
+            .order_by(TeamMember.created_at)
+            .all()
+        )
+        return {
+            "team": [_member_dto(m) for m in members],
+            "emailDeliveryConfigured": False,
+            "myRole": actor_role(db, ctx),
+        }
+
+    from ...models import Profile, WorkspaceMember
+
+    wms = (
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.workspace_id == ctx.workspace.id, WorkspaceMember.status != "suspended")
+        .order_by(WorkspaceMember.created_at)
         .all()
     )
+    user_ids = [wm.user_id for wm in wms]
+    profiles = {p.id: p for p in db.query(Profile).filter(Profile.id.in_(user_ids)).all()} if user_ids else {}
+    team_list = []
+    for wm in wms:
+        p = profiles.get(wm.user_id)
+        display = (p.display_name or p.full_name or (p.email.split("@")[0] if p.email else "Member")) if p else "Member"
+        email = p.email if p else "user@healforge.internal"
+        team_list.append(
+            {
+                "id": str(wm.id),
+                "name": display,
+                "email": email,
+                "role": wm.role.replace("_", " ").title(),
+                "status": wm.status.capitalize(),
+                "joinedAt": time_ago(wm.created_at),
+                "userId": str(wm.user_id),
+                "invitePending": wm.status == "invited",
+            }
+        )
     return {
-        "team": [_member_dto(m) for m in members],
+        "team": team_list,
         "emailDeliveryConfigured": False,
         "myRole": actor_role(db, ctx),
     }
@@ -687,33 +849,87 @@ def invite_member(body: TeamInvite, ctx: CtxDep, db: DbDep, request: Request, re
     if guard.replay is not None:
         return guard.replay
 
+    is_sqlite = str(db.bind.url).startswith("sqlite")
     try:
-        existing = (
-            db.query(TeamMember)
-            .filter(
-                TeamMember.workspace_id == ctx.workspace.id,
-                TeamMember.email == email,
-                TeamMember.revoked_at.is_(None),
+        if is_sqlite:
+            existing = (
+                db.query(TeamMember)
+                .filter(
+                    TeamMember.workspace_id == ctx.workspace.id,
+                    TeamMember.email == email,
+                    TeamMember.revoked_at.is_(None),
+                )
+                .first()
             )
-            .first()
-        )
-        if existing is not None:
-            raise api_error(409, "already_invited", "This email already has an invitation or membership here.")
+            if existing is not None:
+                raise api_error(409, "already_invited", "This email already has an invitation or membership here.")
 
-        token = secrets.token_urlsafe(24)
-        member = TeamMember(
-            id=new_id("mem"),
-            workspace_id=ctx.workspace.id,
-            name=body.name.strip(),
-            email=email,
-            role=body.role,
-            status="Invited",
-            invited_by=ctx.user.username,
-            created_at=utcnow(),
-            invite_token_hash=_hash_invite_token(token),
-            invite_expires_at=utcnow() + timedelta(days=TEAM_INVITE_TTL_DAYS),
-        )
-        db.add(member)
+            token = secrets.token_urlsafe(24)
+            member = TeamMember(
+                id=new_id("mem"),
+                workspace_id=ctx.workspace.id,
+                name=body.name.strip(),
+                email=email,
+                role=body.role,
+                status="Invited",
+                invited_by=ctx.user.username,
+                created_at=utcnow(),
+                invite_token_hash=_hash_invite_token(token),
+                invite_expires_at=utcnow() + timedelta(days=TEAM_INVITE_TTL_DAYS),
+            )
+            db.add(member)
+            member_dto_out = _member_dto(member)
+            expires_at_out = _aware(member.invite_expires_at).isoformat() if member.invite_expires_at else None
+        else:
+            from ...models import Profile, WorkspaceMember
+
+            token = secrets.token_urlsafe(24)
+            profile = db.query(Profile).filter(Profile.email == email).first()
+            if profile is not None:
+                existing_wm = (
+                    db.query(WorkspaceMember)
+                    .filter(
+                        WorkspaceMember.workspace_id == ctx.workspace.id,
+                        WorkspaceMember.user_id == profile.id,
+                        WorkspaceMember.status != "suspended",
+                    )
+                    .first()
+                )
+                if existing_wm is not None:
+                    raise api_error(409, "already_invited", "This user already has a membership or invitation here.")
+
+                wm = WorkspaceMember(
+                    workspace_id=ctx.workspace.id,
+                    user_id=profile.id,
+                    role=body.role.lower().replace(" ", "_"),
+                    status="invited",
+                    invited_by=ctx.user.id,
+                )
+                db.add(wm)
+                db.flush()
+                member_dto_out = {
+                    "id": str(wm.id),
+                    "name": profile.display_name or profile.full_name or email.split("@")[0],
+                    "email": email,
+                    "role": body.role,
+                    "status": "Invited",
+                    "joinedAt": "just now",
+                    "userId": str(profile.id),
+                    "invitePending": True,
+                }
+            else:
+                member_dto_out = {
+                    "id": str(uuid.uuid4()),
+                    "name": body.name.strip(),
+                    "email": email,
+                    "role": body.role,
+                    "status": "Invited",
+                    "joinedAt": "just now",
+                    "userId": None,
+                    "invitePending": True,
+                }
+            expires_at_out = (utcnow() + timedelta(days=TEAM_INVITE_TTL_DAYS)).isoformat()
+
         audit(
             db,
             ctx.workspace.id,
@@ -731,10 +947,10 @@ def invite_member(body: TeamInvite, ctx: CtxDep, db: DbDep, request: Request, re
         idempotency_release(db, guard)
         raise
     response = {
-        "member": _member_dto(member),
+        "member": member_dto_out,
         "emailSent": False,
         "inviteUrl": f"/account/team-invite/{token}",
-        "inviteExpiresAt": _aware(member.invite_expires_at).isoformat() if member.invite_expires_at else None,
+        "inviteExpiresAt": expires_at_out,
         "note": (
             "Email delivery is not configured in this deployment. The invitation link above is "
             "shown ONCE (the token is stored hashed); deliver it to the invitee over a channel you trust."
@@ -821,23 +1037,53 @@ def update_member(
     member_id: str, body: TeamRoleUpdate, ctx: CtxDep, db: DbDep, request: Request, request_id: RequestIdDep
 ) -> dict:
     require_permission(db, ctx, "manage_team")
-    member = (
-        db.query(TeamMember).filter(TeamMember.id == member_id, TeamMember.workspace_id == ctx.workspace.id).first()
+    if str(db.bind.url).startswith("sqlite"):
+        member = (
+            db.query(TeamMember).filter(TeamMember.id == member_id, TeamMember.workspace_id == ctx.workspace.id).first()
+        )
+        if member is None:
+            raise api_error(404, "member_not_found", "Team member not found.")
+        if member.role == "Owner":
+            raise api_error(422, "owner_protected", "The Owner role cannot be changed.")
+        if body.role not in TEAM_ROLES - {"Owner"}:
+            raise api_error(422, "invalid_role", "Invalid role.")
+        member.role = body.role
+        audit(
+            db,
+            ctx.workspace.id,
+            ctx.user.id,
+            "Team",
+            "Team role updated",
+            f"{member.email} role changed to {body.role}.",
+            request.client.host if request.client else "",
+            "Success",
+            request_id,
+        )
+        db.commit()
+        return {"ok": True}
+
+    from ...models import WorkspaceMember
+
+    wm = (
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.id == member_id, WorkspaceMember.workspace_id == ctx.workspace.id)
+        .first()
     )
-    if member is None:
+    if wm is None:
         raise api_error(404, "member_not_found", "Team member not found.")
-    if member.role == "Owner":
+    if wm.role == "owner":
         raise api_error(422, "owner_protected", "The Owner role cannot be changed.")
     if body.role not in TEAM_ROLES - {"Owner"}:
         raise api_error(422, "invalid_role", "Invalid role.")
-    member.role = body.role
+    wm.role = body.role.lower().replace(" ", "_")
+    wm.updated_at = utcnow()
     audit(
         db,
         ctx.workspace.id,
         ctx.user.id,
         "Team",
         "Team role updated",
-        f"{member.email} role changed to {body.role}.",
+        f"Member {member_id} role changed to {body.role}.",
         request.client.host if request.client else "",
         "Success",
         request_id,
@@ -849,12 +1095,49 @@ def update_member(
 @router.delete("/team/{member_id}")
 def remove_member(member_id: str, ctx: CtxDep, db: DbDep, request: Request, request_id: RequestIdDep) -> dict:
     require_permission(db, ctx, "manage_team")
-    member = (
-        db.query(TeamMember).filter(TeamMember.id == member_id, TeamMember.workspace_id == ctx.workspace.id).first()
+    if str(db.bind.url).startswith("sqlite"):
+        member = (
+            db.query(TeamMember).filter(TeamMember.id == member_id, TeamMember.workspace_id == ctx.workspace.id).first()
+        )
+        if member is None:
+            raise api_error(404, "member_not_found", "Team member not found.")
+        if member.role == "Owner":
+            active_owners = count_active_owners(db, ctx.workspace.id)
+            if active_owners <= 1:
+                raise api_error(
+                    409,
+                    "last_owner_protected",
+                    "The last active Owner cannot be removed. Transfer ownership (invite a new Owner-level "
+                    "admin and change roles) or delete the workspace via account deletion.",
+                )
+            raise api_error(422, "owner_protected", "The Owner role cannot be removed; change the role instead.")
+        member.revoked_at = utcnow()
+        member.status = "Revoked"
+        member.invite_token_hash = None
+        audit(
+            db,
+            ctx.workspace.id,
+            ctx.user.id,
+            "Team",
+            "Team member removed",
+            f"{member.email} removed from workspace.",
+            request.client.host if request.client else "",
+            "Warning",
+            request_id,
+        )
+        db.commit()
+        return {"ok": True}
+
+    from ...models import WorkspaceMember
+
+    wm = (
+        db.query(WorkspaceMember)
+        .filter(WorkspaceMember.id == member_id, WorkspaceMember.workspace_id == ctx.workspace.id)
+        .first()
     )
-    if member is None:
+    if wm is None:
         raise api_error(404, "member_not_found", "Team member not found.")
-    if member.role == "Owner":
+    if wm.role == "owner":
         active_owners = count_active_owners(db, ctx.workspace.id)
         if active_owners <= 1:
             raise api_error(
@@ -864,16 +1147,15 @@ def remove_member(member_id: str, ctx: CtxDep, db: DbDep, request: Request, requ
                 "admin and change roles) or delete the workspace via account deletion.",
             )
         raise api_error(422, "owner_protected", "The Owner role cannot be removed; change the role instead.")
-    member.revoked_at = utcnow()
-    member.status = "Revoked"
-    member.invite_token_hash = None
+    wm.status = "suspended"
+    wm.updated_at = utcnow()
     audit(
         db,
         ctx.workspace.id,
         ctx.user.id,
         "Team",
         "Team member removed",
-        f"{member.email} removed from workspace.",
+        f"Member {member_id} removed from workspace.",
         request.client.host if request.client else "",
         "Warning",
         request_id,
@@ -1021,8 +1303,31 @@ def export_account_data(ctx: CtxDep, db: DbDep) -> dict:
             "mfaEnabled": ctx.user.mfa_enabled,
         },
     }
+    is_sqlite = str(db.bind.url).startswith("sqlite")
     if owned_ids:
         ws = owned_ids[0]  # single owned workspace per account in this product
+        if is_sqlite:
+            bug_reports_out = [
+                {"id": b.display_id, "title": b.title, "status": b.status}
+                for b in db.query(BugReport).filter(BugReport.workspace_id == ws).all()
+            ]
+            team_out = [
+                {"name": m.name, "email": m.email, "role": m.role, "status": m.status}
+                for m in db.query(TeamMember).filter(TeamMember.workspace_id == ws).all()
+            ]
+        else:
+            from ...models import WorkspaceMember
+            from .records import _in_memory_bug_reports
+            bug_reports_out = [
+                {"id": b["display_id"], "title": b["title"], "status": b["status"]}
+                for b in _in_memory_bug_reports
+                if b.get("workspace_id") == str(ws)
+            ]
+            team_out = [
+                {"name": str(wm.user_id), "email": "", "role": wm.role, "status": wm.status}
+                for wm in db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == ws).all()
+            ]
+
         bundle.update(
             {
                 "projects": [
@@ -1053,28 +1358,33 @@ def export_account_data(ctx: CtxDep, db: DbDep) -> dict:
                     {"id": p.id, "title": p.title, "status": p.status, "generator": p.generator}
                     for p in db.query(PatchProposal).filter(PatchProposal.workspace_id == ws).all()
                 ],
-                "bugReports": [
-                    {"id": b.display_id, "title": b.title, "status": b.status}
-                    for b in db.query(BugReport).filter(BugReport.workspace_id == ws).all()
-                ],
+                "bugReports": bug_reports_out,
                 "reports": [
                     {"id": r.id, "title": r.title, "type": r.report_type}
                     for r in db.query(Report).filter(Report.workspace_id == ws).all()
                 ],
-                "team": [
-                    {"name": m.name, "email": m.email, "role": m.role, "status": m.status}
-                    for m in db.query(TeamMember).filter(TeamMember.workspace_id == ws).all()
-                ],
+                "team": team_out,
             }
         )
-    memberships = (
-        db.query(TeamMember)
-        .filter(TeamMember.user_id == ctx.user.id, TeamMember.status == "Active", TeamMember.revoked_at.is_(None))
-        .all()
-    )
-    bundle["memberships"] = [
-        {"workspaceId": m.workspace_id, "role": m.role} for m in memberships if m.workspace_id not in owned_ids
-    ]
+    if is_sqlite:
+        memberships = (
+            db.query(TeamMember)
+            .filter(TeamMember.user_id == ctx.user.id, TeamMember.status == "Active", TeamMember.revoked_at.is_(None))
+            .all()
+        )
+        bundle["memberships"] = [
+            {"workspaceId": m.workspace_id, "role": m.role} for m in memberships if m.workspace_id not in owned_ids
+        ]
+    else:
+        from ...models import WorkspaceMember
+        wms = (
+            db.query(WorkspaceMember)
+            .filter(WorkspaceMember.user_id == ctx.user.id, WorkspaceMember.status == "active")
+            .all()
+        )
+        bundle["memberships"] = [
+            {"workspaceId": str(wm.workspace_id), "role": wm.role} for wm in wms if str(wm.workspace_id) not in owned_ids
+        ]
     bundle["sourceCodeIncluded"] = False
     bundle["note"] = (
         "Uploaded source file contents are excluded from this export; use the project deletion flow to remove them. "
@@ -1145,23 +1455,28 @@ def delete_account(ctx: CtxDep, db: DbDep, request: Request, request_id: Request
         "Warning",
         request_id,
     )
+    is_sqlite = str(db.bind.url).startswith("sqlite")
     for ws_id in owned_ids:
-        db.query(Project).filter(Project.workspace_id == ws_id).delete()
-        db.query(ScanJob).filter(ScanJob.workspace_id == ws_id).delete()
-        db.query(Finding).filter(Finding.workspace_id == ws_id).delete()
-        db.query(PatchProposal).filter(PatchProposal.workspace_id == ws_id).delete()
-        db.query(BugReport).filter(BugReport.workspace_id == ws_id).delete()
-        db.query(Report).filter(Report.workspace_id == ws_id).delete()
-        db.query(TeamMember).filter(TeamMember.workspace_id == ws_id).delete()
-        db.query(WebhookEndpoint).filter(WebhookEndpoint.workspace_id == ws_id).delete()
+        if is_sqlite:
+            db.query(Project).filter(Project.workspace_id == ws_id).delete()
+            db.query(ScanJob).filter(ScanJob.workspace_id == ws_id).delete()
+            db.query(Finding).filter(Finding.workspace_id == ws_id).delete()
+            db.query(PatchProposal).filter(PatchProposal.workspace_id == ws_id).delete()
+            db.query(BugReport).filter(BugReport.workspace_id == ws_id).delete()
+            db.query(Report).filter(Report.workspace_id == ws_id).delete()
+            db.query(TeamMember).filter(TeamMember.workspace_id == ws_id).delete()
+            db.query(WebhookEndpoint).filter(WebhookEndpoint.workspace_id == ws_id).delete()
         db.query(Workspace).filter(Workspace.id == ws_id).delete()
     # Detach memberships in workspaces owned by OTHER users (their data stays intact).
-    db.query(TeamMember).filter(TeamMember.user_id == user_id).delete(synchronize_session=False)
-    db.query(Notification).filter(Notification.user_id == user_id).delete()
-    db.query(ApiKey).filter(ApiKey.user_id == user_id).delete()
-    db.query(AuthSession).filter(AuthSession.user_id == user_id).delete()
-    db.query(UserPrefsModel).filter(UserPrefsModel.user_id == user_id).delete()
-    db.query(UserAccount).filter(UserAccount.id == user_id).delete()
+    from ...models import WorkspaceMember
+    db.query(WorkspaceMember).filter(WorkspaceMember.user_id == user_id).delete(synchronize_session=False)
+    if is_sqlite:
+        db.query(TeamMember).filter(TeamMember.user_id == user_id).delete(synchronize_session=False)
+        db.query(Notification).filter(Notification.user_id == user_id).delete()
+        db.query(ApiKey).filter(ApiKey.user_id == user_id).delete()
+        db.query(AuthSession).filter(AuthSession.user_id == user_id).delete()
+        db.query(UserPrefsModel).filter(UserPrefsModel.user_id == user_id).delete()
+        db.query(UserAccount).filter(UserAccount.id == user_id).delete()
     db.commit()
     response.delete_cookie("healforge_session", path="/")
     return {"ok": True}

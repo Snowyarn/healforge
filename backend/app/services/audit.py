@@ -89,16 +89,19 @@ def notify(
         from ..models import Notification
         from ..models.base import new_id
 
-        db.add(
-            Notification(
-                id=new_id("ntf"),
-                user_id=str(user_id) if user_id else "00000000-0000-0000-0000-000000000001",
-                title=title[:250],
-                message=message[:1000],
-                icon=icon,
-                link_screen=link_screen,
-            )
+        note = Notification(
+            id=new_id("ntf"),
+            user_id=str(user_id) if user_id else "00000000-0000-0000-0000-000000000001",
+            title=title[:250],
+            message=message[:1000],
+            icon=icon,
+            link_screen=link_screen,
         )
-        db.commit()
+        if str(db.bind.url).startswith("sqlite"):
+            db.add(note)
+            db.commit()
+        else:
+            from ..api.routers.records import record_in_memory_notification
+            record_in_memory_notification(note)
     except Exception:
         db.rollback()

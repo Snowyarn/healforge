@@ -59,17 +59,37 @@ def _hash_payload(payload) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+_IN_MEMORY_IDEMPOTENCY: dict[str, dict] = {}
+
+
 def _lookup(db: Session, ctx: AuthContext, operation: str, key: str) -> IdempotencyRecord | None:
-    return (
-        db.query(IdempotencyRecord)
-        .filter(
-            IdempotencyRecord.user_id == ctx.user.id,
-            IdempotencyRecord.workspace_id == ctx.workspace.id,
-            IdempotencyRecord.operation == operation,
-            IdempotencyRecord.idempotency_key == key,
+    if str(db.bind.url).startswith("sqlite"):
+        return (
+            db.query(IdempotencyRecord)
+            .filter(
+                IdempotencyRecord.user_id == ctx.user.id,
+                IdempotencyRecord.workspace_id == ctx.workspace.id,
+                IdempotencyRecord.operation == operation,
+                IdempotencyRecord.idempotency_key == key,
+            )
+            .first()
         )
-        .first()
-    )
+    record = _IN_MEMORY_IDEMPOTENCY.get(f"{ctx.workspace.id}:{operation}:{key}")
+    if record:
+        rec = IdempotencyRecord(
+            id=record["id"],
+            user_id=record["user_id"],
+            workspace_id=record["workspace_id"],
+            operation=record["operation"],
+            idempotency_key=record["idempotency_key"],
+            request_hash=record["request_hash"],
+            state=record["state"],
+            expires_at=record["expires_at"],
+            response_status=record.get("response_status"),
+            response_body=record.get("response_body"),
+        )
+        return rec
+    return None
 
 
 def _expired(rec: IdempotencyRecord, now: datetime) -> bool:
@@ -88,9 +108,13 @@ def idempotency_begin(db: Session, ctx: AuthContext, operation: str, key_header:
     now = datetime.now().astimezone()
     existing = _lookup(db, ctx, operation, key)
 
+    is_sqlite = str(db.bind.url).startswith("sqlite")
     if existing is not None and _expired(existing, now):
-        db.delete(existing)
-        db.commit()
+        if is_sqlite:
+            db.delete(existing)
+            db.commit()
+        else:
+            _IN_MEMORY_IDEMPOTENCY.pop(f"{ctx.workspace.id}:{operation}:{key}", None)
         existing = None
 
     if existing is not None:
@@ -111,8 +135,25 @@ def idempotency_begin(db: Session, ctx: AuthContext, operation: str, key_header:
             "An identical request with this Idempotency-Key is still in flight; retry shortly.",
         )
 
+    res_id = new_id("idm")
+    if not is_sqlite:
+        mkey = f"{ctx.workspace.id}:{operation}:{key}"
+        _IN_MEMORY_IDEMPOTENCY[mkey] = {
+            "id": res_id,
+            "user_id": str(ctx.user.id),
+            "workspace_id": str(ctx.workspace.id),
+            "operation": operation,
+            "idempotency_key": key,
+            "request_hash": request_hash,
+            "state": "in_flight",
+            "expires_at": now + timedelta(hours=TTL_HOURS),
+            "response_status": None,
+            "response_body": None,
+        }
+        return IdemGuard(key=key, request_hash=request_hash, reservation_id=f"mem:{mkey}")
+
     reservation = IdempotencyRecord(
-        id=new_id("idm"),
+        id=res_id,
         user_id=ctx.user.id,
         workspace_id=ctx.workspace.id,
         operation=operation,
@@ -137,6 +178,13 @@ def idempotency_store(db: Session, guard: IdemGuard, status_code: int, response:
     """Persist the response on the reservation (only for successful executions)."""
     if guard.reservation_id is None:
         return
+    if str(guard.reservation_id).startswith("mem:"):
+        mkey = guard.reservation_id[4:]
+        if mkey in _IN_MEMORY_IDEMPOTENCY:
+            _IN_MEMORY_IDEMPOTENCY[mkey]["state"] = "completed"
+            _IN_MEMORY_IDEMPOTENCY[mkey]["response_status"] = status_code
+            _IN_MEMORY_IDEMPOTENCY[mkey]["response_body"] = json.loads(json.dumps(response, default=str))
+        return
     rec = db.get(IdempotencyRecord, guard.reservation_id)
     if rec is None:
         return
@@ -150,6 +198,10 @@ def idempotency_release(db: Session, guard: IdemGuard) -> None:
     """Release the reservation after a failed operation so the client can retry cleanly."""
     if guard.reservation_id is None:
         return
+    if str(guard.reservation_id).startswith("mem:"):
+        mkey = guard.reservation_id[4:]
+        _IN_MEMORY_IDEMPOTENCY.pop(mkey, None)
+        return
     rec = db.get(IdempotencyRecord, guard.reservation_id)
     if rec is not None:
         db.delete(rec)
@@ -159,6 +211,11 @@ def idempotency_release(db: Session, guard: IdemGuard) -> None:
 def prune_expired(db: Session) -> int:
     """Remove expired records (housekeeping; returns count)."""
     now = datetime.now().astimezone()
+    if not str(db.bind.url).startswith("sqlite"):
+        stale_keys = [k for k, v in _IN_MEMORY_IDEMPOTENCY.items() if v.get("expires_at") and v["expires_at"] < now]
+        for k in stale_keys:
+            _IN_MEMORY_IDEMPOTENCY.pop(k, None)
+        return len(stale_keys)
     stale = [r for r in db.query(IdempotencyRecord).all() if _expired(r, now)]
     for r in stale:
         db.delete(r)

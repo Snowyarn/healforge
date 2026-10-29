@@ -18,6 +18,9 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
+    if settings.database_schema == "public" or settings.skip_alembic_migrations or "supabase" in settings.database_url:
+        print("[alembic] Target database is Supabase authoritative schema. Alembic migrations skipped.")
+        return
     is_postgres = "postgres" in settings.database_url
     context.configure(
         url=settings.database_url,
@@ -32,6 +35,11 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    # Protect Supabase public schema: do not run Alembic migrations against Supabase
+    if settings.database_schema == "public" or settings.skip_alembic_migrations or "supabase" in settings.database_url:
+        print("[alembic] Target database is Supabase authoritative schema. Alembic migrations skipped.")
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

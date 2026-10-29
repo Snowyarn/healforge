@@ -40,6 +40,11 @@ def _make_engine(url: str):
 
         return engine
     # PostgreSQL (deployment) — psycopg3 driver string expected.
+    # If running inside a Docker container and targeting host loopback, translate to host.docker.internal
+    import os
+    if os.path.exists("/.dockerenv"):
+        url = url.replace("@127.0.0.1:", "@host.docker.internal:").replace("@localhost:", "@host.docker.internal:")
+
     # Uses public schema by default to connect directly to existing Supabase tables.
     connect_args = {}
     if settings.database_schema and settings.database_schema != "public":

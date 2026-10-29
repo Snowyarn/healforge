@@ -35,8 +35,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-healforge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-healforge}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-healforge}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-healforge}}
+      DATABASE_SCHEMA: ${DATABASE_SCHEMA:-public}
+      SKIP_ALEMBIC_MIGRATIONS: ${SKIP_ALEMBIC_MIGRATIONS:-true}
+      SUPABASE_URL: ${SUPABASE_URL:-http://127.0.0.1:54321}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-super-secret-jwt-token-with-at-least-32-characters-long}
       AI_PROVIDER: ${AI_PROVIDER:-nebius}
       NEBIUS_API_KEY: ${NEBIUS_API_KEY:-}
       NEBIUS_BASE_URL: ${NEBIUS_BASE_URL:-https://api.tokenfactory.nebius.com/v1}

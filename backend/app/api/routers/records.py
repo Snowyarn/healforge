@@ -46,15 +46,26 @@ class ReportCreate(BaseModel):
     scanId: str | None = None
 
 
+_in_memory_bug_reports: list[BugReport] = []
+_in_memory_notifications: list[Notification] = []
+
+
+def record_in_memory_notification(note: Notification) -> None:
+    _in_memory_notifications.insert(0, note)
+
+
 @router.get("/bug-reports")
 def list_bug_reports(ctx: CtxDep, db: DbDep) -> dict:
-    reports = (
-        db.query(BugReport)
-        .filter(BugReport.workspace_id == ctx.workspace.id)
-        .order_by(BugReport.created_at.desc())
-        .limit(200)
-        .all()
-    )
+    if str(db.bind.url).startswith("sqlite"):
+        reports = (
+            db.query(BugReport)
+            .filter(BugReport.workspace_id == ctx.workspace.id)
+            .order_by(BugReport.created_at.desc())
+            .limit(200)
+            .all()
+        )
+    else:
+        reports = [b for b in _in_memory_bug_reports if str(b.workspace_id) == str(ctx.workspace.id)]
     out = []
     for b in reports:
         project = db.get(Project, b.project_id) if b.project_id else None
@@ -83,7 +94,11 @@ def create_bug_report(
             .first()
         )
 
-    count = db.query(BugReport).filter(BugReport.workspace_id == ctx.workspace.id).count()
+    is_sqlite = str(db.bind.url).startswith("sqlite")
+    if is_sqlite:
+        count = db.query(BugReport).filter(BugReport.workspace_id == ctx.workspace.id).count()
+    else:
+        count = sum(1 for b in _in_memory_bug_reports if str(b.workspace_id) == str(ctx.workspace.id))
     report = BugReport(
         id=new_id("bug"),
         workspace_id=ctx.workspace.id,
@@ -102,7 +117,11 @@ def create_bug_report(
         f"({'Owner' if ctx.user.role == 'owner' else ctx.user.role})",
         created_at=utcnow(),
     )
-    db.add(report)
+    if is_sqlite:
+        db.add(report)
+        db.commit()
+    else:
+        _in_memory_bug_reports.insert(0, report)
     audit(
         db,
         ctx.workspace.id,
@@ -114,7 +133,6 @@ def create_bug_report(
         "Success",
         request_id,
     )
-    db.commit()
     return {"report": bug_report_dto(report, project.name if project else None)}
 
 
@@ -123,7 +141,17 @@ async def attach_evidence(
     report_id: str, ctx: CtxDep, db: DbDep, request: Request, request_id: RequestIdDep, file: UploadFile = File(...)
 ) -> dict:
     rl.rate_limit(f"evidence:{ctx.user.id}", 30, 3600)
-    report = db.query(BugReport).filter((BugReport.id == report_id) | (BugReport.display_id == report_id)).first()
+    if str(db.bind.url).startswith("sqlite"):
+        report = db.query(BugReport).filter((BugReport.id == report_id) | (BugReport.display_id == report_id)).first()
+    else:
+        report = next(
+            (
+                b
+                for b in _in_memory_bug_reports
+                if (b.id == report_id or b.display_id == report_id) and str(b.workspace_id) == str(ctx.workspace.id)
+            ),
+            None,
+        )
     if report is None or report.workspace_id != ctx.workspace.id:
         raise api_error(404, "report_not_found", "Bug report not found.")
     name = file.filename or "evidence.txt"
@@ -253,13 +281,16 @@ def list_audit_events(ctx: CtxDep, db: DbDep, category: str = "All", q: str = ""
 
 @router.get("/notifications")
 def list_notifications(ctx: CtxDep, db: DbDep) -> dict:
-    notes = (
-        db.query(Notification)
-        .filter(Notification.user_id == ctx.user.id)
-        .order_by(Notification.created_at.desc())
-        .limit(30)
-        .all()
-    )
+    if str(db.bind.url).startswith("sqlite"):
+        notes = (
+            db.query(Notification)
+            .filter(Notification.user_id == ctx.user.id)
+            .order_by(Notification.created_at.desc())
+            .limit(30)
+            .all()
+        )
+    else:
+        notes = [n for n in _in_memory_notifications if str(n.user_id) == str(ctx.user.id)][:30]
     unread = sum(1 for n in notes if n.read_at is None)
     return {
         "notifications": [
@@ -280,18 +311,33 @@ def list_notifications(ctx: CtxDep, db: DbDep) -> dict:
 
 @router.post("/notifications/{notification_id}/read")
 def mark_notification_read(notification_id: str, ctx: CtxDep, db: DbDep) -> dict:
-    note = db.get(Notification, notification_id)
-    if note is None or note.user_id != ctx.user.id:
-        raise api_error(404, "notification_not_found", "Notification not found.")
-    note.read_at = utcnow()
-    db.commit()
+    if str(db.bind.url).startswith("sqlite"):
+        note = db.get(Notification, notification_id)
+        if note is None or note.user_id != ctx.user.id:
+            raise api_error(404, "notification_not_found", "Notification not found.")
+        note.read_at = utcnow()
+        db.commit()
+    else:
+        note = next(
+            (n for n in _in_memory_notifications if n.id == notification_id and str(n.user_id) == str(ctx.user.id)),
+            None,
+        )
+        if note is None:
+            raise api_error(404, "notification_not_found", "Notification not found.")
+        note.read_at = utcnow()
     return {"ok": True}
 
 
 @router.post("/notifications/read-all")
 def mark_all_read(ctx: CtxDep, db: DbDep) -> dict:
-    db.query(Notification).filter(Notification.user_id == ctx.user.id, Notification.read_at.is_(None)).update(
-        {"read_at": utcnow()}
-    )
-    db.commit()
+    if str(db.bind.url).startswith("sqlite"):
+        db.query(Notification).filter(Notification.user_id == ctx.user.id, Notification.read_at.is_(None)).update(
+            {"read_at": utcnow()}
+        )
+        db.commit()
+    else:
+        now = utcnow()
+        for n in _in_memory_notifications:
+            if str(n.user_id) == str(ctx.user.id) and n.read_at is None:
+                n.read_at = now
     return {"ok": True}

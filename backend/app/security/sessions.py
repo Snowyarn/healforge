@@ -116,6 +116,7 @@ def resolve_session(db: Session, request: Request | None) -> AuthSession | None:
         claims = verify_supabase_jwt(token)
         if claims and "sub" in claims:
             user_id = str(claims["sub"])
+            user_email = claims.get("email", "")
             if _is_sqlite(db):
                 try:
                     sess = (
@@ -124,15 +125,18 @@ def resolve_session(db: Session, request: Request | None) -> AuthSession | None:
                         .first()
                     )
                     if sess is not None:
+                        sess.claims_email = user_email
                         return sess
                 except Exception:
                     db.rollback()
-            return AuthSession(
+            sess = AuthSession(
                 id=user_id,
                 user_id=user_id,
                 user_agent=request.headers.get("user-agent", "")[:250],
                 ip=request.client.host if request.client else "",
             )
+            sess.claims_email = user_email
+            return sess
 
     # 3. Single-user local development fallback
     if settings.healforge_single_user:
@@ -201,6 +205,34 @@ def get_auth(db: Session, request: Request = None) -> AuthContext | None:
         profile = db.get(Profile, sess.user_id)
     except Exception:
         db.rollback()
+
+    if profile is None:
+        user_email = getattr(sess, "claims_email", "") or ""
+        if user_email:
+            try:
+                profile = db.query(Profile).filter(Profile.email == user_email).first()
+            except Exception:
+                db.rollback()
+
+    if profile is None:
+        user_email = getattr(sess, "claims_email", "")
+        if user_email or not settings.healforge_single_user:
+            email_val = user_email or f"user-{sess.user_id[:8]}@healforge.local"
+            username_val = email_val.split("@")[0].replace(".", "_")
+            profile = Profile(
+                id=sess.user_id,
+                email=email_val,
+                username=username_val,
+                full_name=username_val.capitalize(),
+                display_name=username_val.capitalize(),
+            )
+            try:
+                db.add(profile)
+                db.commit()
+                db.refresh(profile)
+            except Exception:
+                db.rollback()
+                profile = db.get(Profile, sess.user_id)
 
     if profile is None:
         try:
@@ -348,27 +380,32 @@ def _resolve_workspace_and_role(
     except Exception:
         db.rollback()
 
-    # Fallback: get first available workspace or create default
-    try:
-        ws = db.query(Workspace).first()
-        if ws is not None:
-            return ws, "Owner"
-    except Exception:
-        db.rollback()
-
-    # Seed default workspace if database is empty
+    # If the user has no owned or member workspace, provision their personal workspace
+    ws_slug = f"ws-{user_id_str[:8]}"
     ws = Workspace(
-        name="HealForge Primary Workspace",
-        slug="primary-workspace",
+        name="Personal Workspace",
+        slug=ws_slug,
         owner_id=user_id_str,
-        tier="enterprise",
+        tier="enterprise" if settings.healforge_single_user else "free",
     )
     try:
         db.add(ws)
         db.commit()
         db.refresh(ws)
+        ensure_owner_membership(db, UserAccount(id=user_id_str, email="", username="user"), ws)
+        return ws, "Owner"
     except Exception:
         db.rollback()
+        # In single-user dev mode fallback to first workspace
+        if settings.healforge_single_user:
+            ws = db.query(Workspace).first()
+            if ws is not None:
+                return ws, "Owner"
+    # Final fallback if query fails
+    ws = db.query(Workspace).filter(Workspace.owner_id == user_id_str).first()
+    if ws is not None:
+        return ws, "Owner"
+    ws = db.query(Workspace).first()
     return ws, "Owner"
 
 
