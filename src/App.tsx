@@ -27,6 +27,7 @@ import {
 } from './components/common/ScreenSkeleton';
 import { ProjectImportModal } from './components/projects/ProjectImportModal';
 import { SignInScreen } from './components/auth/SignInScreen';
+import { BackendErrorScreen } from './components/common/BackendErrorScreen';
 import { ApiError, endpoints } from './services/api';
 import type { VerificationStatusDto } from './services/api';
 import { workbenchService } from './services/workbenchService';
@@ -64,8 +65,11 @@ export function App() {
   }>({ items: [], unread: 0 });
   const [importOpen, setImportOpen] = useState(false);
   const [nvidiaConfigured, setNvidiaConfigured] = useState<boolean | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
   const [bootstrapped, setBootstrapped] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
+  const [backendError, setBackendError] = useState<{ message: string; status?: number | null } | null>(null);
   const refreshTimer = useRef<number | null>(null);
 
   const showToast = useCallback((toastData: { type: 'success' | 'info' | 'warning'; title: string; message: string }) => {
@@ -159,27 +163,45 @@ export function App() {
   }, [loadProjects, loadFindings, loadCounts, loadPatch, loadNotifications]);
 
   // Bootstrap session + initial data
-  useEffect(() => {
-    (async () => {
-      try {
-        await endpoints.session();
-        await refreshAll();
-      } catch (exc) {
-        if (exc instanceof ApiError && (exc.code === 'no_session' || exc.status === 401)) {
-          // Multi-user deployment (production posture): a real sign-in is required.
-          setAuthRequired(true);
-        } else {
-          notifyError(exc, 'Backend Connection');
-        }
-      } finally {
-        setBootstrapped(true);
+  const bootstrapSession = useCallback(async () => {
+    setSessionLoading(true);
+    setBackendError(null);
+    try {
+      await endpoints.session();
+      setIsAuthenticated(true);
+      setAuthRequired(false);
+      setBackendError(null);
+      await refreshAll();
+      setBootstrapped(true);
+    } catch (exc) {
+      setIsAuthenticated(false);
+      if (exc instanceof ApiError && (exc.code === 'no_session' || exc.status === 401)) {
+        // Multi-user deployment (production posture): a real sign-in is required.
+        setAuthRequired(true);
+        setBackendError(null);
+      } else {
+        const status = exc instanceof ApiError ? exc.status : null;
+        const message = exc instanceof ApiError
+          ? exc.message
+          : (exc instanceof Error ? exc.message : 'Cannot reach the HealForge backend API.');
+        setAuthRequired(false);
+        setBackendError({ message, status });
       }
-    })();
-  }, [refreshAll, notifyError]);
+    } finally {
+      setSessionLoading(false);
+    }
+  }, [refreshAll]);
+
+  useEffect(() => {
+    bootstrapSession();
+  }, [bootstrapSession]);
 
   // Session expiry mid-use (any API call returning 401) returns to the sign-in screen.
   useEffect(() => {
-    const onUnauthorized = () => setAuthRequired(true);
+    const onUnauthorized = () => {
+      setIsAuthenticated(false);
+      setAuthRequired(true);
+    };
     window.addEventListener('healforge:unauthorized', onUnauthorized);
     return () => window.removeEventListener('healforge:unauthorized', onUnauthorized);
   }, []);
@@ -229,6 +251,22 @@ export function App() {
     });
     window.setTimeout(() => setIsLoading(false), 700);
   }, [refreshAll, showToast]);
+
+  const handleSignOut = useCallback(async () => {
+    try {
+      await endpoints.logout();
+    } catch {
+      // Ignore logout errors
+    } finally {
+      setIsAuthenticated(false);
+      setAuthRequired(true);
+      showToast({
+        type: 'info',
+        title: 'Signed Out',
+        message: 'You have been signed out of your session.',
+      });
+    }
+  }, [showToast]);
 
   // Auto-load full detail of the first finding when the screen opens with no selection.
   // (Ref is declared first; effect fires after data loads.)
@@ -293,26 +331,62 @@ export function App() {
 
   // ---- Render ---------------------------------------------------------------
 
-  // Multi-user deployments (production posture) require a real sign-in before
-  // any workspace data is available. The single-user local bootstrap never
-  // reaches this branch.
-  if (authRequired) {
-    return (
-      <SignInScreen
-        onSignedIn={() => {
-          setAuthRequired(false);
-          refreshAll(true);
-        }}
-      />
-    );
-  }
-
+  // 1. Landing homepage: publicly viewable
   if (currentScreen === 'home') {
     return (
       <>
         <Toast toast={toast} onClose={() => setToast(null)} />
         <HomepageScreen onLaunchWorkbench={handleNavigate} />
       </>
+    );
+  }
+
+  // 2. Protected workspace screens: require verified backend session
+  // Loading state while verifying session
+  if (sessionLoading) {
+    return (
+      <div className="min-h-screen bg-surface-default flex flex-col items-center justify-center p-6 text-center animate-fade-in">
+        <div className="w-14 h-14 rounded-2xl bg-primary text-on-primary flex items-center justify-center mb-4 shadow-lg animate-pulse">
+          <span className="material-symbols-outlined text-[32px]">security</span>
+        </div>
+        <p className="text-sm font-bold text-text-primary">Connecting to HealForge Security Engine...</p>
+        <p className="text-xs text-text-secondary mt-1">Verifying authenticated session and workspace access</p>
+      </div>
+    );
+  }
+
+  // 3. Backend connectivity failure (HTTP 404, 5xx, or network unreachable)
+  if (backendError) {
+    return (
+      <BackendErrorScreen
+        error={backendError.message}
+        status={backendError.status}
+        isRetrying={sessionLoading}
+        onRetry={bootstrapSession}
+        onNavigateHome={() => {
+          setCurrentScreen('home');
+          window.location.hash = '';
+        }}
+      />
+    );
+  }
+
+  // 4. Authentication required (HTTP 401 or no active session)
+  if (authRequired || !isAuthenticated) {
+    return (
+      <SignInScreen
+        onSignedIn={() => {
+          setIsAuthenticated(true);
+          setAuthRequired(false);
+          setBackendError(null);
+          setBootstrapped(true);
+          refreshAll(true);
+        }}
+        onNavigateHome={() => {
+          setCurrentScreen('home');
+          window.location.hash = '';
+        }}
+      />
     );
   }
 
@@ -328,6 +402,7 @@ export function App() {
       counts={counts}
       notifications={notifications}
       onMarkNotificationRead={handleMarkNotificationRead}
+      onSignOut={handleSignOut}
     >
       <Toast toast={toast} onClose={() => setToast(null)} />
       <ProjectImportModal

@@ -464,6 +464,7 @@ export const endpoints = {
   login: (body: { email: string; password: string }) => api.post<SessionInfo>('/auth/login', body),
   register: (body: { email: string; username: string; password: string }) =>
     api.post<SessionInfo>('/auth/register', body),
+  logout: () => api.post<{ ok: boolean }>('/auth/logout'),
   nvidiaStatus: () => api.get<NvidiaStatusDto>('/nvidia/status'),
   counts: () => api.get<CountsDto>('/counts'),
 

@@ -17,6 +17,7 @@ interface TopBarProps {
   };
   onMarkNotificationRead?: (id: string) => void;
   onNavigate?: (screen: ScreenId) => void;
+  onSignOut?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -31,9 +32,11 @@ export const TopBar: React.FC<TopBarProps> = ({
   notifications,
   onMarkNotificationRead,
   onNavigate,
+  onSignOut,
 }) => {
   const [isRepoOpen, setIsRepoOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const { profile } = useAccountStateLoaded();
   const items = notifications?.items ?? [];
   const unread = notifications?.unread ?? 0;
@@ -162,15 +165,53 @@ export const TopBar: React.FC<TopBarProps> = ({
           )}
         </div>
 
-        {/* User Avatar - Opens Account Center */}
-        <button
-          onClick={onNavigateToAccountCenter}
-          className="w-8 h-8 rounded-full bg-primary hover:bg-primary-container text-on-primary font-bold text-xs flex items-center justify-center transition-transform hover:scale-105 active:scale-95 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
-          title={`Signed in as ${profile.fullName} (@${profile.username}) — Open Account Center`}
-          aria-label="Account Settings and Profile"
-        >
-          <span>{profile.avatarInitials}</span>
-        </button>
+        {/* User Avatar Menu */}
+        <div className="relative">
+          <button
+            onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
+            className="w-8 h-8 rounded-full bg-primary hover:bg-primary-container text-on-primary font-bold text-xs flex items-center justify-center transition-transform hover:scale-105 active:scale-95 shadow-sm focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+            title={`Signed in as ${profile.fullName} (@${profile.username})`}
+            aria-label="Account Settings and Profile"
+          >
+            <span>{profile.avatarInitials}</span>
+          </button>
+
+          {isUserMenuOpen && (
+            <div className="absolute right-0 mt-2 w-64 bg-surface-card rounded-xl shadow-lg border border-border-subtle py-2 z-50 animate-fade-in">
+              <div className="px-4 py-2 border-b border-border-subtle">
+                <p className="font-bold text-sm text-text-primary leading-tight">{profile.fullName || profile.username}</p>
+                <p className="text-xs text-text-muted mt-0.5">@{profile.username}</p>
+                <p className="text-[11px] font-mono text-text-muted truncate mt-0.5">{profile.email}</p>
+              </div>
+
+              <div className="py-1">
+                <button
+                  onClick={() => {
+                    setIsUserMenuOpen(false);
+                    onNavigateToAccountCenter?.();
+                  }}
+                  className="w-full text-left px-4 py-2 text-xs font-semibold text-text-primary hover:bg-surface-container flex items-center gap-2 transition-colors"
+                >
+                  <span className="material-symbols-outlined text-[18px] text-text-secondary">manage_accounts</span>
+                  <span>Account Center</span>
+                </button>
+
+                {onSignOut && (
+                  <button
+                    onClick={() => {
+                      setIsUserMenuOpen(false);
+                      onSignOut();
+                    }}
+                    className="w-full text-left px-4 py-2 text-xs font-semibold text-status-critical hover:bg-status-critical/10 flex items-center gap-2 transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-[18px]">logout</span>
+                    <span>Sign Out</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </header>
   );

@@ -3,6 +3,7 @@ import { ApiError, endpoints } from '../../services/api';
 
 interface SignInScreenProps {
   onSignedIn: () => void;
+  onNavigateHome?: () => void;
 }
 
 type Mode = 'login' | 'register';
@@ -15,25 +16,34 @@ type Mode = 'login' | 'register';
  * renders this screen — the server provisions that session automatically.
  * No credentials are stored client-side; the session is an HttpOnly cookie.
  */
-export const SignInScreen: React.FC<SignInScreenProps> = ({ onSignedIn }) => {
+export const SignInScreen: React.FC<SignInScreenProps> = ({ onSignedIn, onNavigateHome }) => {
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setInfoMessage(null);
     setBusy(true);
     try {
       if (mode === 'login') {
         await endpoints.login({ email, password });
+        onSignedIn();
       } else {
-        await endpoints.register({ email, username, password });
+        const res = await endpoints.register({ email, username, password });
+        const conf = (res as unknown as { requires_confirmation?: boolean; message?: string })?.requires_confirmation;
+        if (conf) {
+          setInfoMessage('Account created! Please check your email inbox to confirm your email before signing in.');
+          setMode('login');
+        } else {
+          onSignedIn();
+        }
       }
-      onSignedIn();
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : 'Cannot reach the HealForge backend.');
     } finally {
@@ -111,6 +121,15 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({ onSignedIn }) => {
             />
           </div>
 
+          {infoMessage && (
+            <div
+              role="status"
+              className="p-3 rounded-lg bg-status-success/10 border border-status-success/20 text-xs text-status-success"
+            >
+              {infoMessage}
+            </div>
+          )}
+
           {error && (
             <div
               role="alert"
@@ -135,12 +154,26 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({ onSignedIn }) => {
               onClick={() => {
                 setMode(mode === 'login' ? 'register' : 'login');
                 setError(null);
+                setInfoMessage(null);
               }}
               className="text-primary font-semibold hover:underline"
             >
               {mode === 'login' ? 'Create one' : 'Sign in instead'}
             </button>
           </p>
+
+          {onNavigateHome && (
+            <div className="pt-2 border-t border-border-subtle">
+              <button
+                type="button"
+                onClick={onNavigateHome}
+                className="w-full py-2 text-xs text-text-secondary hover:text-text-primary font-medium flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                <span>Return to Homepage</span>
+              </button>
+            </div>
+          )}
         </form>
 
         <p className="text-center text-[11px] text-text-muted mt-6 leading-relaxed">

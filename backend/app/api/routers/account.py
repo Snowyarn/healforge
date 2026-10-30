@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Request, Response
@@ -618,6 +619,7 @@ def list_webhooks(ctx: CtxDep, db: DbDep) -> dict:
             ]
         }
     from ...models import IntegrationConnection
+
     conns = (
         db.query(IntegrationConnection)
         .filter(
@@ -649,13 +651,19 @@ def create_webhook(body: WebhookCreate, ctx: CtxDep, db: DbDep, request: Request
     events = [e for e in body.events if e in WEBHOOK_EVENTS]
     if str(db.bind.url).startswith("sqlite"):
         hook = WebhookEndpoint(
-            id=new_id("whk"), workspace_id=ctx.workspace.id, url=body.url, events=events, created_at=utcnow(), active=True
+            id=new_id("whk"),
+            workspace_id=ctx.workspace.id,
+            url=body.url,
+            events=events,
+            created_at=utcnow(),
+            active=True,
         )
         db.add(hook)
         db.commit()
         hook_id = hook.id
     else:
         from ...models import IntegrationConnection
+
         conn = IntegrationConnection(
             workspace_id=ctx.workspace.id,
             provider="custom_webhook",
@@ -698,6 +706,7 @@ def delete_webhook(webhook_id: str, ctx: CtxDep, db: DbDep, request: Request, re
         db.commit()
     else:
         from ...models import IntegrationConnection
+
         conn = (
             db.query(IntegrationConnection)
             .filter(
@@ -1318,6 +1327,7 @@ def export_account_data(ctx: CtxDep, db: DbDep) -> dict:
         else:
             from ...models import WorkspaceMember
             from .records import _in_memory_bug_reports
+
             bug_reports_out = [
                 {"id": b["display_id"], "title": b["title"], "status": b["status"]}
                 for b in _in_memory_bug_reports
@@ -1377,13 +1387,16 @@ def export_account_data(ctx: CtxDep, db: DbDep) -> dict:
         ]
     else:
         from ...models import WorkspaceMember
+
         wms = (
             db.query(WorkspaceMember)
             .filter(WorkspaceMember.user_id == ctx.user.id, WorkspaceMember.status == "active")
             .all()
         )
         bundle["memberships"] = [
-            {"workspaceId": str(wm.workspace_id), "role": wm.role} for wm in wms if str(wm.workspace_id) not in owned_ids
+            {"workspaceId": str(wm.workspace_id), "role": wm.role}
+            for wm in wms
+            if str(wm.workspace_id) not in owned_ids
         ]
     bundle["sourceCodeIncluded"] = False
     bundle["note"] = (
@@ -1469,6 +1482,7 @@ def delete_account(ctx: CtxDep, db: DbDep, request: Request, request_id: Request
         db.query(Workspace).filter(Workspace.id == ws_id).delete()
     # Detach memberships in workspaces owned by OTHER users (their data stays intact).
     from ...models import WorkspaceMember
+
     db.query(WorkspaceMember).filter(WorkspaceMember.user_id == user_id).delete(synchronize_session=False)
     if is_sqlite:
         db.query(TeamMember).filter(TeamMember.user_id == user_id).delete(synchronize_session=False)
