@@ -1,0 +1,15 @@
+# Never copy into the backend image:
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.db
+*.db-shm
+*.db-wal
+tests/
+README.md
+.venv/
+venv/

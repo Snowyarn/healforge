@@ -360,11 +360,16 @@ export const HomepageScreen: React.FC<HomepageScreenProps> = ({ onLaunchWorkbenc
             <div className="p-6 rounded-xl bg-surface-card border border-border-subtle">
               <div className="flex items-center gap-3 mb-3">
                 <span className="material-symbols-outlined text-primary text-[24px]">fact_check</span>
-                <h3 className="font-headline-sm text-text-primary">Transparent Prototype Status</h3>
+                <h3 className="font-headline-sm text-text-primary">Transparent Implementation Status</h3>
               </div>
               <p className="text-body-sm text-text-secondary leading-relaxed">
-                This workbench implementation executes on React 19 + TypeScript. All background scanning, patch
-                application, and sandbox traces operate in deterministic mock simulation mode for design and UX validation.
+                This workbench runs on React 19 + TypeScript against a real FastAPI backend with a relational
+                database: projects, scans, findings, patches, reviews and audit events are persisted server records
+                — not mock data. Static analysis and secret detection run for real on imported source. NVIDIA-hosted
+                model inference is used only after explicit consent and only when the operator has configured
+                NVIDIA_API_KEY server-side. Execution-based verification stays honestly disabled
+                (verification_unavailable) until an isolated runner is deployed and proven — untrusted code is
+                never executed on this host.
               </p>
             </div>
           </div>
@@ -380,7 +385,7 @@ export const HomepageScreen: React.FC<HomepageScreenProps> = ({ onLaunchWorkbenc
               <h3 className="font-headline-sm text-text-primary text-base">Current Implementation Status</h3>
             </div>
             <span className="text-[11px] font-label-code-sm bg-primary/10 text-primary px-2 py-0.5 rounded font-mono">
-              Frontend Prototype v2.4
+              Full-Stack Build v1.1
             </span>
           </div>
           <div className="divide-y divide-border-subtle text-body-sm">
@@ -422,13 +427,41 @@ export const HomepageScreen: React.FC<HomepageScreenProps> = ({ onLaunchWorkbenc
 
             <div className="p-4 sm:flex sm:items-center justify-between">
               <div>
-                <span className="font-label-ui text-text-primary block">Live Production Security Engine</span>
+                <span className="font-label-ui text-text-primary block">Live Security Engine &amp; Persistence</span>
                 <span className="text-text-secondary text-xs">
-                  Direct connection to real gVisor microVM cluster and enterprise repository webhooks.
+                  Real FastAPI backend: ZIP import with safety limits, static analysis (SAST/secrets/SBOM/container),
+                  persisted findings, human-governed patch review, reports and audit trail.
+                </span>
+              </div>
+              <span className="mt-2 sm:mt-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded font-label-code-sm text-xs bg-emerald-50 text-status-success border border-emerald-100">
+                <span className="w-1.5 h-1.5 rounded-full bg-status-success" /> Implemented
+              </span>
+            </div>
+
+            <div className="p-4 sm:flex sm:items-center justify-between">
+              <div>
+                <span className="font-label-ui text-text-primary block">NVIDIA-Hosted Model Inference</span>
+                <span className="text-text-secondary text-xs">
+                  Finding enrichment and patch synthesis call NVIDIA NIM (Nemotron) server-side — only after explicit
+                  consent, with secret redaction, and only when the operator configures NVIDIA_API_KEY.
+                </span>
+              </div>
+              <span className="mt-2 sm:mt-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded font-label-code-sm text-xs bg-amber-50 text-status-warning border border-amber-100">
+                Requires operator key
+              </span>
+            </div>
+
+            <div className="p-4 sm:flex sm:items-center justify-between">
+              <div>
+                <span className="font-label-ui text-text-primary block">Isolated Execution Verification</span>
+                <span className="text-text-secondary text-xs">
+                  Untrusted code is never executed on the host. Execution verification returns
+                  verification_unavailable until a separately isolated, proven runner is deployed; static
+                  re-analysis is offered as limited evidence instead.
                 </span>
               </div>
               <span className="mt-2 sm:mt-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded font-label-code-sm text-xs bg-surface-container text-text-muted border border-border-subtle">
-                Phase 6 Backend Spec
+                Not configured
               </span>
             </div>
           </div>

@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { ScreenId, VerifiedFixItem } from '../types';
-import { mockVerifiedFixes } from '../services/mockData';
+import { endpoints } from '../services/api';
 
 interface VerifiedFixesScreenProps {
   onNavigate: (screen: ScreenId) => void;
@@ -11,9 +11,22 @@ export const VerifiedFixesScreen: React.FC<VerifiedFixesScreenProps> = ({
   onNavigate,
   onTriggerToast,
 }) => {
-  const [fixes] = useState<VerifiedFixItem[]>(mockVerifiedFixes);
-  const [selectedFix, setSelectedFix] = useState<VerifiedFixItem | null>(mockVerifiedFixes[0]);
+  const [fixes, setFixes] = useState<VerifiedFixItem[]>([]);
+  const [note, setNote] = useState<string>('');
+  const [selectedFix, setSelectedFix] = useState<VerifiedFixItem | null>(null);
+
+  useEffect(() => {
+    endpoints
+      .verifiedFixes()
+      .then((res) => {
+        setFixes(res.fixes);
+        setNote(res.note);
+        setSelectedFix(res.fixes[0] ?? null);
+      })
+      .catch(() => undefined);
+  }, []);
   const [searchQuery, setSearchQuery] = useState('');
+  void note; // surfaced via the drawer note below
 
   const filteredFixes = fixes.filter(
     (f) =>

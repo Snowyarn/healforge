@@ -12,7 +12,7 @@ export const SessionsSection: React.FC<SessionsSectionProps> = ({ sessions, onTr
   const [showRevokeAllModal, setShowRevokeAllModal] = useState(false);
   const [sessionToRevoke, setSessionToRevoke] = useState<ActiveSession | null>(null);
 
-  const handleRevokeSingle = (session: ActiveSession) => {
+  const handleRevokeSingle = async (session: ActiveSession) => {
     if (session.isCurrent) {
       onTriggerToast({
         type: 'warning',
@@ -24,9 +24,9 @@ export const SessionsSection: React.FC<SessionsSectionProps> = ({ sessions, onTr
     setSessionToRevoke(session);
   };
 
-  const confirmRevokeSingle = () => {
+  const confirmRevokeSingle = async () => {
     if (!sessionToRevoke) return;
-    const res = accountService.revokeSession(sessionToRevoke.id);
+    const res = await accountService.revokeSession(sessionToRevoke.id);
     setSessionToRevoke(null);
     onTriggerToast({
       type: res.success ? 'success' : 'warning',
@@ -35,8 +35,8 @@ export const SessionsSection: React.FC<SessionsSectionProps> = ({ sessions, onTr
     });
   };
 
-  const confirmRevokeAllOther = () => {
-    const res = accountService.revokeAllOtherSessions();
+  const confirmRevokeAllOther = async () => {
+    const res = await accountService.revokeAllOtherSessions();
     setShowRevokeAllModal(false);
     onTriggerToast({
       type: 'success',

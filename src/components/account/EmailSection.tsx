@@ -13,7 +13,7 @@ export const EmailSection: React.FC<EmailSectionProps> = ({ profile, onTriggerTo
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleRequestChange = (e: React.FormEvent) => {
+  const handleRequestChange = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newEmail !== confirmEmail) {
       onTriggerToast({
@@ -33,7 +33,7 @@ export const EmailSection: React.FC<EmailSectionProps> = ({ profile, onTriggerTo
     }
 
     setIsSubmitting(true);
-    const result = accountService.requestEmailChange(newEmail.trim());
+    const result = await accountService.requestEmailChange(newEmail.trim());
     setIsSubmitting(false);
 
     if (result.success) {
@@ -54,8 +54,8 @@ export const EmailSection: React.FC<EmailSectionProps> = ({ profile, onTriggerTo
     }
   };
 
-  const handleResend = () => {
-    const res = accountService.resendEmailVerification();
+  const handleResend = async () => {
+    const res = await accountService.resendEmailVerification();
     onTriggerToast({
       type: res.success ? 'info' : 'warning',
       title: 'Email Dispatch',

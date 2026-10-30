@@ -1,24 +1,24 @@
-import React, { useState } from 'react';
-import type { AgentExecutionLog } from '../types';
+import React, { useEffect, useState } from 'react';
+import type { ScreenId, AgentExecutionLog } from '../types';
+import { endpoints } from '../services/api';
+import { workbenchService } from '../services/workbenchService';
 
 interface AgentActivityScreenProps {
-  executions: AgentExecutionLog[];
   onTriggerToast: (toast: { type: 'success' | 'info' | 'warning'; title: string; message: string }) => void;
+  onNavigate?: (screen: ScreenId) => void;
 }
 
-export const AgentActivityScreen: React.FC<AgentActivityScreenProps> = ({
-  executions,
-  onTriggerToast,
-}) => {
+export const AgentActivityScreen: React.FC<AgentActivityScreenProps> = ({ onTriggerToast, onNavigate }) => {
   const [streamFilter, setStreamFilter] = useState<'all' | 'solver' | 'replay'>('all');
+  const [executions, setExecutions] = useState<AgentExecutionLog[]>([]);
+  const [telemetry, setTelemetry] = useState<{
+    activeAgents: number; successRate: string; runsPerHour: number; totalExecutions: number;
+    monitoredRepos: { name: string; runtime: string; projectId: string }[]; workerNode: string;
+  } | null>(null);
   const [isEngineRunning, setIsEngineRunning] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [severityFilter, setSeverityFilter] = useState('all');
-  const [expandedTraceIds, setExpandedTraceIds] = useState<Record<string, boolean>>({
-    '#EX-94821': false,
-    '#EX-94819': false,
-    '#EX-94812': false,
-  });
+  const [expandedTraceIds, setExpandedTraceIds] = useState<Record<string, boolean>>({});
 
   const toggleTrace = (id: string) => {
     setExpandedTraceIds((prev) => ({
@@ -27,16 +27,26 @@ export const AgentActivityScreen: React.FC<AgentActivityScreenProps> = ({
     }));
   };
 
-  const handleToggleEngine = () => {
-    const newState = !isEngineRunning;
-    setIsEngineRunning(newState);
-    onTriggerToast({
-      type: newState ? 'success' : 'warning',
-      title: newState ? 'Autonomous Engine Resumed' : 'Autonomous Engine Paused',
-      message: newState
-        ? 'Worker node hf-worker-09a actively polling repository webhooks.'
-        : 'Worker queue paused. No active remediation jobs will dispatch.',
-    });
+  useEffect(() => {
+    workbenchService.getAgentExecutions().then(setExecutions).catch(() => undefined);
+    endpoints.agentTelemetry().then(setTelemetry).catch(() => undefined);
+    endpoints.engineState().then((s) => setIsEngineRunning(!s.paused)).catch(() => undefined);
+  }, []);
+
+  const handleToggleEngine = async () => {
+    try {
+      const res = isEngineRunning ? await endpoints.enginePause() : await endpoints.engineResume();
+      setIsEngineRunning(!res.paused);
+      onTriggerToast({
+        type: res.paused ? 'warning' : 'success',
+        title: res.paused ? 'Autonomous Engine Paused' : 'Autonomous Engine Resumed',
+        message: res.paused
+          ? 'Engine paused for this workspace (persisted server-side). Manual scans remain available.'
+          : 'Engine resumed — automated activity continues for this workspace.',
+      });
+    } catch {
+      onTriggerToast({ type: 'warning', title: 'Engine Control Failed', message: 'Backend unreachable.' });
+    }
   };
 
   const filteredExecutions = executions.filter((item) => {
@@ -143,31 +153,27 @@ export const AgentActivityScreen: React.FC<AgentActivityScreenProps> = ({
 
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-surface-container/50 p-4 rounded-lg">
-                <span className="text-body-sm text-text-muted block mb-1">Active Agents</span>
-                <span className="text-headline-md font-headline-md text-on-surface">14</span>
+                <span className="text-body-sm text-text-muted block mb-1">Recent Executions</span>
+                <span className="text-headline-md font-headline-md text-on-surface">{telemetry ? telemetry.totalExecutions : '—'}</span>
                 <span className="text-label-code-sm text-status-success flex items-center gap-1 mt-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-status-success" /> Optimal
                 </span>
               </div>
               <div className="bg-surface-container/50 p-4 rounded-lg">
                 <span className="text-body-sm text-text-muted block mb-1">Success Rate</span>
-                <span className="text-headline-md font-headline-md text-on-surface">99.4%</span>
+                <span className="text-headline-md font-headline-md text-on-surface">{telemetry ? telemetry.successRate : '—'}</span>
                 <span className="text-label-code-sm text-text-secondary mt-1 block">Last 24 hours</span>
               </div>
             </div>
 
             <div className="flex flex-col gap-2 pt-2 border-t border-border-subtle">
               <div className="flex justify-between text-body-sm">
-                <span className="text-text-secondary">AST Taint Solver</span>
-                <span className="font-label-code-sm text-on-surface">42 runs/hr</span>
+                <span className="text-text-secondary">Worker</span>
+                <span className="font-label-code-sm text-on-surface">{telemetry?.workerNode ?? '—'}</span>
               </div>
               <div className="flex justify-between text-body-sm">
-                <span className="text-text-secondary">gVisor Replay</span>
-                <span className="font-label-code-sm text-on-surface">18 runs/hr</span>
-              </div>
-              <div className="flex justify-between text-body-sm">
-                <span className="text-text-secondary">Semgrep Parser</span>
-                <span className="font-label-code-sm text-on-surface">128 runs/hr</span>
+                <span className="text-text-secondary">Total runs</span>
+                <span className="font-label-code-sm text-on-surface">{telemetry ? telemetry.runsPerHour : '—'}</span>
               </div>
             </div>
           </div>
@@ -180,38 +186,27 @@ export const AgentActivityScreen: React.FC<AgentActivityScreenProps> = ({
             </h3>
 
             <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between p-3 rounded-lg bg-surface-container/30 border border-border-subtle hover:bg-surface-container/60 transition-colors cursor-pointer">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined text-primary">code</span>
-                  <div>
-                    <span className="text-body-md font-label-ui text-on-surface block">core-api-service</span>
-                    <span className="text-body-sm text-text-muted font-label-code-sm">HEAD @ 8f92a11</span>
+              {(telemetry?.monitoredRepos ?? []).map((repo) => (
+                <button
+                  key={repo.projectId}
+                  onClick={() => onNavigate?.('repositories')}
+                  className="w-full flex items-center justify-between p-3 rounded-lg bg-surface-container/30 border border-border-subtle hover:bg-surface-container/60 transition-colors text-left"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="material-symbols-outlined text-primary">code</span>
+                    <div>
+                      <span className="text-body-md font-label-ui text-on-surface block">{repo.name}</span>
+                      <span className="text-body-sm text-text-muted font-label-code-sm">{repo.runtime}</span>
+                    </div>
                   </div>
-                </div>
-                <span className="w-2 h-2 rounded-full bg-status-success" />
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg bg-surface-container/30 border border-border-subtle hover:bg-surface-container/60 transition-colors cursor-pointer">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined text-primary">code</span>
-                  <div>
-                    <span className="text-body-md font-label-ui text-on-surface block">auth-gateway</span>
-                    <span className="text-body-sm text-text-muted font-label-code-sm">HEAD @ c42e190</span>
-                  </div>
-                </div>
-                <span className="w-2 h-2 rounded-full bg-status-success" />
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg bg-surface-container/30 border border-border-subtle hover:bg-surface-container/60 transition-colors cursor-pointer">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-outlined text-primary">code</span>
-                  <div>
-                    <span className="text-body-md font-label-ui text-on-surface block">payment-processor</span>
-                    <span className="text-body-sm text-text-muted font-label-code-sm">HEAD @ 1b83f4c</span>
-                  </div>
-                </div>
-                <span className="w-2 h-2 rounded-full bg-status-critical animate-pulse" />
-              </div>
+                  <span className="w-2 h-2 rounded-full bg-status-success" />
+                </button>
+              ))}
+              {(!telemetry || telemetry.monitoredRepos.length === 0) && (
+                <p className="text-body-sm text-text-muted text-center py-4">
+                  No monitored repositories yet — import a project first.
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -247,7 +242,15 @@ export const AgentActivityScreen: React.FC<AgentActivityScreenProps> = ({
 
           {/* Execution Log Entries */}
           <div className="flex flex-col gap-4">
-            {filteredExecutions.length === 0 ? (
+            {executions.length === 0 ? (
+              <div className="p-10 text-center bg-surface-card rounded-xl border border-dashed border-border-subtle">
+                <span className="material-symbols-outlined text-3xl text-text-muted block mb-2">neurology</span>
+                <p className="text-body-md text-text-primary font-medium">No agent executions yet</p>
+                <p className="text-body-sm text-text-muted mt-1">
+                  Execution records are created when scans run — trigger one from Security Scans.
+                </p>
+              </div>
+            ) : filteredExecutions.length === 0 ? (
               <div className="p-8 text-center text-text-muted bg-surface-card rounded-xl border border-border-subtle">
                 No matching execution streams found for "{searchQuery}".
               </div>

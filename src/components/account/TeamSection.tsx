@@ -16,18 +16,25 @@ export const TeamSection: React.FC<TeamSectionProps> = ({
 }) => {
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
   const [memberToRemove, setMemberToRemove] = useState<TeamMember | null>(null);
+  const [lastInvite, setLastInvite] = useState<{ email: string; url: string } | null>(null);
 
-  const handleInvite = (name: string, email: string, role: TeamRole) => {
-    const res = accountService.inviteTeamMember(name, email, role);
+  const handleInvite = async (name: string, email: string, role: TeamRole) => {
+    setLastInvite(null);
+    const res = await accountService.inviteTeamMember(name, email, role);
     onTriggerToast({
       type: res.success ? 'success' : 'warning',
-      title: res.success ? 'Invitation Dispatched' : 'Error',
+      title: res.success ? 'Invitation Created' : 'Error',
       message: res.message,
     });
+    if (res.success && res.inviteUrl) {
+      // The server shows this link ONCE (the token is stored hashed). Surface it
+      // for manual delivery because email delivery is not configured.
+      setLastInvite({ email, url: res.inviteUrl });
+    }
   };
 
-  const handleRoleChange = (id: string, newRole: TeamRole) => {
-    const res = accountService.updateTeamMemberRole(id, newRole);
+  const handleRoleChange = async (id: string, newRole: TeamRole) => {
+    const res = await accountService.updateTeamMemberRole(id, newRole);
     onTriggerToast({
       type: res.success ? 'success' : 'warning',
       title: 'Role Updated',
@@ -35,9 +42,9 @@ export const TeamSection: React.FC<TeamSectionProps> = ({
     });
   };
 
-  const confirmRemoveMember = () => {
+  const confirmRemoveMember = async () => {
     if (!memberToRemove) return;
-    const res = accountService.removeTeamMember(memberToRemove.id);
+    const res = await accountService.removeTeamMember(memberToRemove.id);
     setMemberToRemove(null);
     onTriggerToast({
       type: res.success ? 'info' : 'warning',
@@ -67,29 +74,63 @@ export const TeamSection: React.FC<TeamSectionProps> = ({
         </button>
       </div>
 
-      {/* Workspace Banner */}
+      {/* Workspace Banner (real data only — no invented seat counts or IDs) */}
       <div className="p-5 rounded-2xl bg-surface-card border border-border-subtle shadow-sm flex items-center justify-between flex-wrap gap-4">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-xl bg-surface-dark text-primary-fixed flex items-center justify-center font-bold text-lg">
-            AC
+            {(organizationName || 'HF').slice(0, 2).toUpperCase()}
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h3 className="font-bold text-sm text-text-primary">{organizationName}</h3>
-              <span className="text-[10px] font-mono bg-surface-container text-text-muted px-2 py-0.5 rounded">
-                slug: acme-corp
-              </span>
             </div>
             <p className="text-xs text-text-muted mt-0.5">
-              Workspace ID: hf_org_99214 • Enterprise Tier (25 Seats Available)
+              {team.length} member{team.length === 1 ? '' : 's'} • role-based access control enforced server-side
             </p>
           </div>
         </div>
 
-        <div className="text-xs text-text-muted font-mono">
-          {team.length} of 25 seats filled
+        <div className="text-xs text-text-muted">
+          Email delivery: not configured
         </div>
       </div>
+
+      {/* One-time invitation link (email delivery not configured — manual handoff) */}
+      {lastInvite && (
+        <div className="p-5 rounded-2xl bg-status-warning/5 border border-status-warning/25">
+          <div className="flex items-start gap-3">
+            <span className="material-symbols-outlined text-[20px] text-status-warning">share</span>
+            <div className="flex-1 min-w-0">
+              <h4 className="text-xs font-bold text-text-primary">Invitation link for {lastInvite.email} (shown once)</h4>
+              <p className="text-[11px] text-text-muted mt-1 leading-relaxed">
+                Email delivery is not configured in this deployment. Copy this link and deliver it to the invitee over a
+                channel you trust. It expires after 7 days, binds to the invited email address, and can only be used once.
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <code className="flex-1 min-w-0 truncate px-3 py-2 rounded-lg bg-surface-container border border-border-subtle text-[11px] font-mono text-text-secondary">
+                  {lastInvite.url}
+                </code>
+                <button
+                  onClick={() => {
+                    navigator.clipboard?.writeText(lastInvite.url);
+                    onTriggerToast({ type: 'success', title: 'Copied', message: 'Invitation link copied to clipboard.' });
+                  }}
+                  className="px-3 py-2 rounded-lg bg-primary hover:bg-primary-container text-on-primary text-[11px] font-semibold transition-all"
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+            <button
+              onClick={() => setLastInvite(null)}
+              className="text-text-muted hover:text-text-primary p-1"
+              title="Dismiss"
+            >
+              <span className="material-symbols-outlined text-[16px]">close</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Team Members Table */}
       <div className="bg-surface-card border border-border-subtle rounded-2xl p-6 shadow-sm space-y-4">

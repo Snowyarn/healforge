@@ -11,6 +11,12 @@ interface ApplicationLayoutProps {
   repositories: string[];
   onTriggerRefresh: () => void;
   isLoading?: boolean;
+  counts?: { repositories: number; vulnerabilities: number; patchReviews: number; verifiedFixes: number };
+  notifications?: {
+    items: { id: string; title: string; message: string; icon: string; linkScreen: string; read: boolean }[];
+    unread: number;
+  };
+  onMarkNotificationRead?: (id: string) => void;
   children: React.ReactNode;
 }
 
@@ -22,6 +28,9 @@ export const ApplicationLayout: React.FC<ApplicationLayoutProps> = ({
   repositories,
   onTriggerRefresh,
   isLoading = false,
+  counts,
+  notifications,
+  onMarkNotificationRead,
   children,
 }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -34,6 +43,7 @@ export const ApplicationLayout: React.FC<ApplicationLayoutProps> = ({
         onNavigate={onNavigate}
         isOpenMobile={isMobileMenuOpen}
         onCloseMobile={() => setIsMobileMenuOpen(false)}
+        counts={counts}
       />
 
       {/* Main Container offset by sidebar width on large screens */}
@@ -48,6 +58,9 @@ export const ApplicationLayout: React.FC<ApplicationLayoutProps> = ({
           onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
           onTriggerRefresh={onTriggerRefresh}
           isLoading={isLoading}
+          notifications={notifications}
+          onMarkNotificationRead={onMarkNotificationRead}
+          onNavigate={onNavigate}
         />
 
         {/* Content Body */}

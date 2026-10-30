@@ -15,7 +15,7 @@ export const PrivacySection: React.FC<PrivacySectionProps> = ({
 }) => {
   const [privacy, setPrivacy] = useState<PrivacyPreferences>(initialPrivacy);
 
-  const handleToggle = (key: keyof PrivacyPreferences) => {
+  const handleToggle = async (key: keyof PrivacyPreferences) => {
     const updated = {
       ...privacy,
       [key]: !privacy[key],
@@ -43,20 +43,12 @@ export const PrivacySection: React.FC<PrivacySectionProps> = ({
     });
   };
 
-  const handleExportData = () => {
-    const jsonString = accountService.generateDataExportJson();
-    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `healforge-account-export-${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-
+  const handleExportData = async () => {
+    const res = await accountService.downloadDataExport();
     onTriggerToast({
-      type: 'success',
-      title: 'Export Generated',
-      message: 'Your complete account and audit history JSON archive has been downloaded.',
+      type: res.success ? 'success' : 'warning',
+      title: res.success ? 'Export Downloaded' : 'Export Failed',
+      message: res.message,
     });
   };
 

@@ -14,8 +14,8 @@ export const DangerZoneSection: React.FC<DangerZoneSectionProps> = ({
   const [isDeactivateModalOpen, setIsDeactivateModalOpen] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
 
-  const handleDeactivate = () => {
-    const res = accountService.deactivateAccount();
+  const handleDeactivate = async () => {
+    const res = await accountService.deactivateAccount();
     setIsDeactivateModalOpen(false);
     onTriggerToast({
       type: 'warning',
@@ -24,8 +24,8 @@ export const DangerZoneSection: React.FC<DangerZoneSectionProps> = ({
     });
   };
 
-  const handleConfirmPermanentDelete = () => {
-    const res = accountService.deleteAccount();
+  const handleConfirmPermanentDelete = async () => {
+    const res = await accountService.deleteAccount();
     onTriggerToast({
       type: 'warning',
       title: 'Account Purged',

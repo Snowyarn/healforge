@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { ScreenId, Vulnerability, RepositoryHealth } from '../types';
 import { SeverityBadge } from '../components/common/SeverityBadge';
 import { ReachabilityBadge } from '../components/common/ReachabilityBadge';
 import { AutofixBadge } from '../components/common/AutofixBadge';
+import { endpoints } from '../services/api';
+import type { DashboardDto } from '../services/api';
 
 interface DashboardScreenProps {
   onNavigate: (screen: ScreenId) => void;
@@ -10,6 +12,8 @@ interface DashboardScreenProps {
   onSelectRepository: (repoName: string) => void;
   vulnerabilities: Vulnerability[];
   repositories: RepositoryHealth[];
+  onOpenImport?: () => void;
+  onRefresh?: () => void | Promise<void>;
 }
 
 export const DashboardScreen: React.FC<DashboardScreenProps> = ({
@@ -18,12 +22,30 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   onSelectRepository,
   vulnerabilities,
   repositories,
+  onOpenImport,
+  onRefresh,
 }) => {
   const [showAllFindings, setShowAllFindings] = useState(false);
+  const [overview, setOverview] = useState<DashboardDto | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    endpoints
+      .dashboard()
+      .then((d) => {
+        if (!cancelled) setOverview(d);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [onRefresh]);
 
   const displayedVulnerabilities = showAllFindings
     ? vulnerabilities
     : vulnerabilities.slice(0, 4);
+
+  const metrics = overview?.metrics;
 
   return (
     <div className="flex flex-col w-full p-margin space-y-6 animate-fade-in">
@@ -40,7 +62,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             Security Operations Dashboard
           </h1>
           <p className="text-xs text-text-muted mt-0.5">
-            Continuous AST taint tracking, autonomous pull request synthesis, and ephemeral sandbox verification.
+            Live workspace metrics from persisted scans and findings — no simulated data.
           </p>
         </div>
 
@@ -67,6 +89,15 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <span className="material-symbols-outlined text-[16px]">terminal</span>
             <span>Code Explorer</span>
           </button>
+          {onOpenImport && (
+            <button
+              onClick={onOpenImport}
+              className="px-3.5 py-2 rounded-xl bg-surface-container hover:bg-surface-container-high border border-border-subtle text-xs font-semibold text-text-primary flex items-center gap-1.5 transition-all"
+            >
+              <span className="material-symbols-outlined text-[16px]">upload_file</span>
+              <span>Import Source</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -84,7 +115,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <span className="material-symbols-outlined text-primary text-[18px]">source</span>
           </div>
           <div className="mt-2">
-            <span className="text-xl font-bold font-headline-sm text-text-primary">4</span>
+            <span className="text-xl font-bold font-headline-sm text-text-primary">{metrics ? metrics.projectCount : '—'}</span>
             <span className="text-[10px] text-text-muted block mt-0.5">Monitored</span>
           </div>
         </div>
@@ -101,8 +132,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <span className="material-symbols-outlined text-[#0284c7] text-[18px]">history</span>
           </div>
           <div className="mt-2">
-            <span className="text-xl font-bold font-headline-sm text-text-primary">5</span>
-            <span className="text-[10px] text-text-muted block mt-0.5">Last 24h</span>
+            <span className="text-xl font-bold font-headline-sm text-text-primary">{metrics ? metrics.scanCount : '—'}</span>
+            <span className="text-[10px] text-text-muted block mt-0.5">Total Runs</span>
           </div>
         </div>
 
@@ -118,7 +149,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <span className="material-symbols-outlined text-status-warning text-[18px]">pest_control</span>
           </div>
           <div className="mt-2">
-            <span className="text-xl font-bold font-headline-sm text-text-primary">6</span>
+            <span className="text-xl font-bold font-headline-sm text-text-primary">{metrics ? metrics.openFindingCount : vulnerabilities.length}</span>
             <span className="text-[10px] text-text-muted block mt-0.5">Identified</span>
           </div>
         </div>
@@ -136,8 +167,10 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           </div>
           <div className="mt-2">
             <div className="flex items-baseline gap-1.5">
-              <span className="text-xl font-bold font-headline-sm text-status-critical">02</span>
-              <span className="text-xs text-text-secondary font-mono">/ 03</span>
+              <span className="text-xl font-bold font-headline-sm text-status-critical">
+                {metrics ? String(metrics.criticalCount).padStart(2, '0') : '—'}
+              </span>
+              <span className="text-xs text-text-secondary font-mono">/ {metrics ? metrics.highCount : '—'}</span>
             </div>
             <span className="text-[10px] text-status-critical font-semibold block mt-0.5">Triage Needed</span>
           </div>
@@ -155,8 +188,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <span className="material-symbols-outlined text-primary text-[18px]">code</span>
           </div>
           <div className="mt-2">
-            <span className="text-xl font-bold font-headline-sm text-text-primary">1</span>
-            <span className="text-[10px] text-primary font-semibold block mt-0.5">AST Ready</span>
+            <span className="text-xl font-bold font-headline-sm text-text-primary">{metrics ? metrics.pendingReviewCount : '—'}</span>
+            <span className="text-[10px] text-primary font-semibold block mt-0.5">Awaiting Review</span>
           </div>
         </div>
 
@@ -172,8 +205,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <span className="material-symbols-outlined text-status-success text-[18px]">check_circle</span>
           </div>
           <div className="mt-2">
-            <span className="text-xl font-bold font-headline-sm text-status-success">3</span>
-            <span className="text-[10px] text-text-muted block mt-0.5">Neutralized</span>
+            <span className="text-xl font-bold font-headline-sm text-status-success">{metrics ? metrics.verifiedFixCount : '—'}</span>
+            <span className="text-[10px] text-text-muted block mt-0.5">Verified</span>
           </div>
         </div>
 
@@ -189,8 +222,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <span className="material-symbols-outlined text-status-success text-[18px]">verified_user</span>
           </div>
           <div className="mt-2">
-            <span className="text-xl font-bold font-headline-sm text-status-success">0</span>
-            <span className="text-[10px] text-status-success font-semibold block mt-0.5">100% Pass</span>
+            <span className="text-xl font-bold font-headline-sm text-status-success">{metrics ? metrics.regressionCount : '—'}</span>
+            <span className="text-[10px] text-status-success font-semibold block mt-0.5">Regressions</span>
           </div>
         </div>
       </div>
@@ -211,6 +244,23 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {repositories.length === 0 && (
+            <div className="md:col-span-3 bg-surface-canvas border border-dashed border-border-subtle rounded-2xl p-10 text-center">
+              <span className="material-symbols-outlined text-3xl text-text-muted">folder_open</span>
+              <p className="text-body-md text-text-primary font-medium mt-3">No projects yet</p>
+              <p className="text-body-sm text-text-muted mt-1">
+                Import a source archive (ZIP) to create your first real project, then run a scan.
+              </p>
+              {onOpenImport && (
+                <button
+                  onClick={onOpenImport}
+                  className="mt-4 px-4 py-2 rounded-xl bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold"
+                >
+                  Import Source Project
+                </button>
+              )}
+            </div>
+          )}
           {repositories.map((repo) => (
             <div
               key={repo.name}
@@ -303,6 +353,13 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-border-subtle/50">
+              {displayedVulnerabilities.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="py-10 px-5 text-center text-text-muted text-xs">
+                    No open findings — import a project and run a scan to populate this backlog.
+                  </td>
+                </tr>
+              )}
               {displayedVulnerabilities.map((v) => (
                 <tr
                   key={v.id}
@@ -372,56 +429,36 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             </div>
 
             <div className="space-y-4">
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-surface-container/30 border border-border-subtle">
-                <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0 text-primary">
-                  <span className="material-symbols-outlined text-[18px]">code</span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-xs text-text-primary">Generated fix for CVE-2024-2149 in payments-api</span>
-                    <span className="text-[11px] text-text-muted font-mono">2m ago</span>
+              {(overview?.recentAgentActivities ?? []).map((a) => (
+                <div key={a.id} className="flex items-start gap-3 p-3 rounded-xl bg-surface-container/30 border border-border-subtle">
+                  <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0 text-primary">
+                    <span className="material-symbols-outlined text-[18px]">{a.icon}</span>
                   </div>
-                  <p className="text-xs text-text-secondary mt-0.5 leading-relaxed">
-                    AST analysis verified parameter sanitization pattern in <code className="bg-surface-container px-1 rounded font-mono text-[10px]">db/queries.py:142</code>.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-surface-container/30 border border-border-subtle">
-                <div className="w-8 h-8 rounded-lg bg-status-success/10 flex items-center justify-center shrink-0 text-status-success">
-                  <span className="material-symbols-outlined text-[18px]">verified</span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-xs text-text-primary">Sandbox test suite completed successfully</span>
-                    <span className="text-[11px] text-text-muted font-mono">14m ago</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-xs text-text-primary">{a.title}</span>
+                      <span className="text-[11px] text-text-muted font-mono">{a.timeAgo}</span>
+                    </div>
+                    <p className="text-xs text-text-secondary mt-0.5 leading-relaxed">{a.description}</p>
                   </div>
-                  <p className="text-xs text-text-secondary mt-0.5 leading-relaxed">
-                    Ran 412 unit tests and 54 integration tests against PR #104. Zero regressions found.
-                  </p>
                 </div>
-              </div>
-
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-surface-container/30 border border-border-subtle">
-                <div className="w-8 h-8 rounded-lg bg-surface-container flex items-center justify-center shrink-0 text-text-secondary">
-                  <span className="material-symbols-outlined text-[18px]">policy</span>
+              ))}
+              {(!overview || overview.recentAgentActivities.length === 0) && (
+                <div className="p-6 rounded-xl bg-surface-container/30 border border-dashed border-border-subtle text-center text-xs text-text-muted">
+                  No agent activity yet — activity records appear when scans run.
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-xs text-text-primary">Policy governance check passed</span>
-                    <span className="text-[11px] text-text-muted font-mono">45m ago</span>
-                  </div>
-                  <p className="text-xs text-text-secondary mt-0.5 leading-relaxed">
-                    Verified compliance with OWASP Top 10 and internal ISO-27001 coding guidelines.
-                  </p>
-                </div>
-              </div>
+              )}
             </div>
           </div>
 
           <div className="mt-5 pt-4 border-t border-border-subtle/50 flex items-center justify-between text-xs text-text-muted">
-            <span>Remediation Velocity: 14.2 min average MTTR</span>
-            <span className="font-mono text-primary font-semibold">48 fixes applied this month</span>
+            <span>
+              Remediation Velocity:{' '}
+              {overview ? overview.remediationVelocity.avgTimeToFix : 'no data yet'}
+            </span>
+            <span className="font-mono text-primary font-semibold">
+              {overview ? `${overview.remediationVelocity.appliedPatches} patches approved` : ''}
+            </span>
           </div>
         </div>
 
@@ -432,30 +469,33 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
               <div className="flex items-center gap-2">
                 <span className="material-symbols-outlined text-primary-fixed text-[20px]">terminal</span>
                 <h2 className="font-headline-sm text-sm font-bold text-surface-bright">
-                  gVisor MicroVM Sandbox
+                  Verification Runner
                 </h2>
               </div>
-              <span className="text-[10px] font-mono font-bold bg-primary/20 text-primary-fixed px-2 py-0.5 rounded">
-                ACTIVE
+              <span className="text-[10px] font-mono font-bold bg-status-high/20 text-status-high px-2 py-0.5 rounded">
+                EXECUTION DISABLED
               </span>
             </div>
             <p className="text-xs text-secondary-fixed-dim mb-4 leading-relaxed">
-              Isolated microVM executing continuous fuzzing and regression verification.
+              No isolated sandbox runner is verified in this deployment. Untrusted code is never executed on the
+              host — verification is limited to static re-analysis. See the Verification screen for policy details.
             </p>
 
             {/* Terminal Output Box */}
             <div className="bg-[#0b1411] text-surface-bright font-mono p-3 rounded-xl text-[11px] space-y-1 mb-4 overflow-x-auto border border-outline/20">
-              <div className="text-status-success">[INFO] Initializing sandbox container...</div>
-              <div className="text-secondary-fixed-dim">[BUILD] Target: payments-api:v2.4</div>
-              <div className="text-secondary-fixed-dim">[TEST] Executing vulnerability payload tests...</div>
-              <div className="text-status-success">[PASS] CVE-2024-2149 patch neutralized exploit vector.</div>
-              <div className="text-status-success">[PASS] All integration suites green. Ready for merge.</div>
+              {(overview?.activeSandboxSummary.recentLogs ?? [
+                { text: 'No verification runs recorded yet.', type: 'neutral' as const },
+              ]).map((l, i) => (
+                <div key={i} className={l.type === 'success' ? 'text-status-success' : 'text-secondary-fixed-dim'}>
+                  {l.text}
+                </div>
+              ))}
             </div>
           </div>
 
           <div className="flex items-center justify-between pt-4 border-t border-outline/20">
             <span className="text-xs text-secondary-fixed-dim font-mono">
-              ID: <code className="text-primary-fixed">sb-88f2a1</code>
+              Status: <code className="text-primary-fixed">verification_unavailable</code>
             </span>
             <button
               onClick={() => onNavigate('verification')}

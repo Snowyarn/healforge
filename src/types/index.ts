@@ -86,6 +86,12 @@ export interface SecurityScanRecord {
   trigger: 'Manual Scan' | 'CI/CD Webhook' | 'Scheduled Cron' | 'Pull Request Hook';
   commitHash: string;
   logs: string[];
+  statusRaw?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  mediumCount?: number;
+  lowCount?: number;
+  projectId?: string;
+  modelEnrichment?: string;
+  error?: { code: string; message: string } | null;
 }
 
 export interface VerifiedFixItem {
@@ -94,14 +100,18 @@ export interface VerifiedFixItem {
   title: string;
   project: string;
   patchId: string;
-  verificationResult: '100% Tests Passed' | 'Partial Pass' | 'Regression Free';
+  verificationResult: string; // e.g. 'Static Analysis Verified' — never fabricated
   verificationTimestamp: string;
   reviewer: string;
   attestationHash: string;
+  attestationKind?: string;
   testsPassed: number;
   testsTotal: number;
-  regressionRisk: 'Zero Regressions' | 'Low Risk' | 'Audited';
+  checksKind?: string;
+  regressionRisk: string; // honest: 'Not Execution-Verified' when no sandbox ran
   evidenceReportUrl: string;
+  mode?: string;
+  internalRunId?: string;
 }
 
 export interface CodeExplorerFile {
@@ -123,6 +133,8 @@ export interface SecurityIntelligenceMetric {
   mttrHours: number;
   totalRemediated: number;
   averageVerificationTimeSec: number;
+  totalFindings?: number;
+  hasData?: boolean;
 }
 
 export interface SecurityReport {
@@ -136,11 +148,13 @@ export interface SecurityReport {
   findingsCount: number;
   criticalCount: number;
   format: 'PDF' | 'Markdown' | 'JSON';
+  checksThatRan?: string[];
 }
 
 export interface Vulnerability {
-  id: string; // e.g. 'CVE-2024-41110', 'CVE-2024-2149'
-  cwe: string; // e.g. 'CWE-288: Authentication Bypass Using an Alternate Path'
+  id: string; // display id, e.g. 'HF-0001' or 'CVE-2024-2149'
+  internalId?: string; // stable backend row id
+  cwe: string;
   title: string;
   description: string;
   service: string; // 'auth-service', 'payments-api', 'ingestion-pipeline'
@@ -148,16 +162,31 @@ export interface Vulnerability {
   affectedFile: string;
   exactLines: string;
   discoveredBy: string;
+  discoveredAt?: string;
   severity: SeverityLevel;
   cvssScore: number;
+  cvssBasis?: string;
   reachability: ReachabilityStatus;
+  reachabilityBasis?: string;
   autofixStatus: AutofixStatus;
+  status?: string; // open | resolved | false_positive
+  confidence?: string;
+  hasPatch?: boolean;
+  patchId?: string | null;
+  modelAnalysis?: {
+    impact: string;
+    recommendation: string;
+    confidence: string;
+    provenance: Record<string, unknown>;
+    disclaimer: string;
+  } | null;
+  projectId?: string;
   codeSnippet: {
     language: string;
     filePath: string;
     lines: string;
     code: CodeLine[];
-  };
+  } | null;
   taintSteps: {
     step: number;
     description: string;
@@ -190,8 +219,12 @@ export interface PatchItem {
   addedLinesCount: number;
   removedLinesCount: number;
   status: PatchStatus;
+  statusRaw?: string;
+  version?: number;
   generatedAgo: string;
   generator: string;
+  findingId?: string;
+  reviews?: { action: string; notes: string; actor: string; at: string | null }[];
   originalCode: CodeLine[];
   patchedCode: CodeLine[];
   astImpact: {
@@ -280,6 +313,7 @@ export interface RepositoryHealth {
   highCount: number;
   headCommit?: string;
   status?: 'optimal' | 'critical';
+  projectId?: string;
 }
 
 export interface DashboardOverview {
@@ -288,6 +322,12 @@ export interface DashboardOverview {
     highCount: number;
     mediumCount: number;
     passRate: string;
+    projectCount?: number;
+    scanCount?: number;
+    openFindingCount?: number;
+    pendingReviewCount?: number;
+    verifiedFixCount?: number;
+    regressionCount?: number;
   };
   repositories: RepositoryHealth[];
   remediationVelocity: {

@@ -11,30 +11,26 @@ export const IntegrationsSection: React.FC<IntegrationsSectionProps> = ({
   integrations,
   onTriggerToast,
 }) => {
-  const handleToggleConnect = (item: ConnectedIntegration) => {
-    if (item.connected) {
-      const res = accountService.toggleIntegration(item.id, false);
-      onTriggerToast({
-        type: 'info',
-        title: 'Integration Disconnected',
-        message: res.message,
-      });
-    } else {
-      const demoAccount = item.provider === 'github' ? 'acme-corp' : `${item.provider}-org-auth`;
-      const res = accountService.toggleIntegration(item.id, true, demoAccount);
-      onTriggerToast({
-        type: 'success',
-        title: 'Integration Connected',
-        message: res.message,
-      });
-    }
+  /**
+   * HONEST STATE: no external provider (GitHub/Slack/Jira/…) credentials are
+   * configured in this deployment, so there is nothing real to connect to.
+   * Connect buttons are disabled with the server-provided setup instructions —
+   * a click can never fabricate a "connected" account.
+   */
+  const handleDisconnect = async (item: ConnectedIntegration) => {
+    const res = await accountService.toggleIntegration(item.id, false);
+    onTriggerToast({
+      type: res.success ? 'info' : 'warning',
+      title: res.success ? 'Integration Disconnected' : 'Action Unavailable',
+      message: res.message,
+    });
   };
 
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="pb-4 border-b border-border-subtle">
         <h2 className="text-lg font-bold font-headline-sm text-text-primary">
-          Connected Applications & Integrations
+          Connected Applications &amp; Integrations
         </h2>
         <p className="text-xs text-text-muted mt-0.5">
           Link HealForge with your source code hosts, alert channels, and issue tracking software.
@@ -82,7 +78,7 @@ export const IntegrationsSection: React.FC<IntegrationsSectionProps> = ({
                             item.connected ? 'bg-status-success' : 'bg-text-muted'
                           }`}
                         />
-                        {item.connected ? 'Active' : 'Disconnected'}
+                        {item.connected ? 'Active' : item.notConfigured ? 'Not configured' : 'Disconnected'}
                       </span>
                       {item.accountName && (
                         <span className="text-[11px] font-mono text-text-muted">
@@ -93,21 +89,38 @@ export const IntegrationsSection: React.FC<IntegrationsSectionProps> = ({
                   </div>
                 </div>
 
-                <button
-                  onClick={() => handleToggleConnect(item)}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    item.connected
-                      ? 'bg-surface-container hover:bg-status-critical/10 border border-border-subtle hover:border-status-critical/30 text-text-secondary hover:text-status-critical'
-                      : 'bg-primary hover:bg-primary-container text-on-primary shadow-sm'
-                  }`}
-                >
-                  {item.connected ? 'Disconnect' : 'Connect'}
-                </button>
+                {item.connected ? (
+                  <button
+                    onClick={() => handleDisconnect(item)}
+                    className="px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all bg-surface-container hover:bg-status-critical/10 border border-border-subtle hover:border-status-critical/30 text-text-secondary hover:text-status-critical"
+                  >
+                    Disconnect
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    title={item.setupInstructions || 'This integration is not configured in this deployment.'}
+                    className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-surface-container border border-border-subtle text-text-muted cursor-not-allowed"
+                  >
+                    Connect
+                  </button>
+                )}
               </div>
 
               <p className="text-xs text-text-secondary mt-3 leading-relaxed">
                 {item.description}
               </p>
+
+              {!item.connected && item.notConfigured && (
+                <div className="mt-3 p-3 rounded-lg bg-surface-container/70 border border-border-subtle/60">
+                  <p className="text-[11px] text-text-muted leading-relaxed">
+                    <span className="font-semibold text-text-secondary">Not configured.</span>{' '}
+                    {item.setupInstructions ||
+                      'An operator must configure this provider server-side before it can be connected.'}{' '}
+                    Until then, import source code via the ZIP archive flow.
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="mt-4 pt-3 border-t border-border-subtle/50 flex items-center justify-between text-[11px] text-text-muted">

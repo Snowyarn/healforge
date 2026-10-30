@@ -2,10 +2,11 @@ import React, { useState } from 'react';
 import type { ScreenId, PatchItem, PatchStatus } from '../types';
 
 interface PatchReviewScreenProps {
-  patch: PatchItem;
+  patch: PatchItem | null;
   onNavigate: (screen: ScreenId) => void;
   onUpdateStatus: (status: PatchStatus) => void;
   onTriggerToast: (toast: { type: 'success' | 'info' | 'warning'; title: string; message: string }) => void;
+  onReviewed: () => void;
 }
 
 export const PatchReviewScreen: React.FC<PatchReviewScreenProps> = ({
@@ -13,51 +14,85 @@ export const PatchReviewScreen: React.FC<PatchReviewScreenProps> = ({
   onNavigate,
   onUpdateStatus,
   onTriggerToast,
+  onReviewed,
 }) => {
-  const [currentStatus, setCurrentStatus] = useState<PatchStatus>(patch.status);
-  const [isRejecting, setIsRejecting] = useState(false);
-  const [isApproving, setIsApproving] = useState(false);
+  const [overrideStatus, setOverrideStatus] = useState<PatchStatus | null>(null);
+  const currentStatus: PatchStatus = overrideStatus ?? patch?.status ?? 'Pending Review';
+  const [isBusy, setIsBusy] = useState(false);
   const [showChangesModal, setShowChangesModal] = useState(false);
   const [changeNotes, setChangeNotes] = useState('');
 
-  const handleApprove = () => {
-    setIsApproving(true);
-    setTimeout(() => {
-      setIsApproving(false);
-      setCurrentStatus('Approved');
-      onUpdateStatus('Approved');
-      onTriggerToast({
-        type: 'success',
-        title: 'Patch Approved & Merged',
-        message: `${patch.id} (${patch.title}) merged into sandbox release candidate. Sandbox container scheduled for final regression.`,
-      });
-    }, 700);
-  };
+  if (!patch) {
+    return (
+      <div className="flex flex-col w-full p-margin space-y-6 animate-fade-in">
+        <div className="bg-surface-card border border-dashed border-border-subtle rounded-2xl p-14 text-center">
+          <span className="material-symbols-outlined text-4xl text-text-muted">difference</span>
+          <p className="text-body-md text-text-primary font-medium mt-4">No patch in review</p>
+          <p className="text-body-sm text-text-muted mt-1 max-w-md mx-auto">
+            Patches appear here after model synthesis on a finding. Approve, reject or request changes —
+            patches are never auto-applied or merged.
+          </p>
+          <div className="flex items-center justify-center gap-2 mt-4">
+            <button
+              onClick={() => onNavigate('vulnerabilities')}
+              className="px-4 py-2 rounded-xl bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold"
+            >
+              Browse Findings
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-  const handleReject = () => {
-    setIsRejecting(true);
-    setTimeout(() => {
-      setIsRejecting(false);
-      setCurrentStatus('Rejected');
-      onUpdateStatus('Rejected');
+  /** Real review action: persisted server-side with optimistic version check. */
+  const submitReview = async (action: 'approve' | 'reject' | 'request_changes', notes = '') => {
+    setIsBusy(true);
+    try {
+      const { workbenchService } = await import('../services/workbenchService');
+      const updated = await workbenchService.reviewPatch(patch!.id, action, notes, patch!.version ?? 1);
+      setOverrideStatus(updated.status);
+      onUpdateStatus(updated.status);
+      onReviewed();
+      onTriggerToast({
+        type: action === 'approve' ? 'success' : action === 'reject' ? 'warning' : 'info',
+        title:
+          action === 'approve'
+            ? 'Patch Approved'
+            : action === 'reject'
+              ? 'Patch Rejected'
+              : 'Changes Requested',
+        message:
+          action === 'approve'
+            ? `Review decision persisted for ${updated.id}. Nothing is auto-merged — deployment stays human-governed.`
+            : action === 'reject'
+              ? `Rejection persisted for ${updated.id}. The finding stays open for an alternative fix.`
+              : `Change request persisted with notes for ${updated.id}.`,
+      });
+    } catch (exc) {
+      const { ApiError } = await import('../services/api');
+      const msg = exc instanceof ApiError ? `${exc.code}: ${exc.message}` : 'Backend unreachable.';
       onTriggerToast({
         type: 'warning',
-        title: 'Patch Rejected',
-        message: `${patch.id} was rejected. Autonomous repair agent scheduled to generate alternative AST permutation.`,
+        title: 'Review Failed',
+        message: msg.includes('version_conflict')
+          ? 'The patch changed since you loaded it. Reload and review the latest version.'
+          : msg,
       });
-    }, 500);
+    } finally {
+      setIsBusy(false);
+    }
   };
+
+  const handleApprove = () => submitReview('approve');
+
+  const handleReject = () => submitReview('reject');
 
   const handleRequestChangesSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setShowChangesModal(false);
-    setCurrentStatus('Changes Requested');
-    onUpdateStatus('Changes Requested');
-    onTriggerToast({
-      type: 'info',
-      title: 'Changes Requested',
-      message: `Feedback dispatched to HealForge Agent: "${changeNotes || 'Please adjust SQL binding syntax.'}"`,
-    });
+    submitReview('request_changes', changeNotes);
+    setChangeNotes('');
   };
 
   return (
@@ -95,28 +130,29 @@ export const PatchReviewScreen: React.FC<PatchReviewScreenProps> = ({
           <div className="flex items-center gap-3">
             <button
               onClick={handleReject}
-              disabled={isRejecting || currentStatus === 'Rejected'}
+              disabled={isBusy || currentStatus !== 'Pending Review'}
               className="px-4 py-2 rounded-full bg-surface text-text-secondary hover:bg-surface-container font-label-ui border border-border-subtle transition-all flex items-center gap-2 hover:text-status-critical disabled:opacity-50"
             >
               <span className="material-symbols-outlined text-[18px]">close</span>
-              {isRejecting ? 'Rejecting...' : 'Reject'}
+              {isBusy ? 'Rejecting…' : 'Reject'}
             </button>
             <button
               onClick={() => setShowChangesModal(true)}
-              className="px-4 py-2 rounded-full bg-surface text-text-secondary hover:bg-surface-container font-label-ui border border-border-subtle transition-all flex items-center gap-2"
+              disabled={isBusy || currentStatus !== 'Pending Review'}
+              className="px-4 py-2 rounded-full bg-surface text-text-secondary hover:bg-surface-container font-label-ui border border-border-subtle transition-all flex items-center gap-2 disabled:opacity-50"
             >
               <span className="material-symbols-outlined text-[18px]">rate_review</span>
               Request Changes
             </button>
             <button
               onClick={handleApprove}
-              disabled={isApproving || currentStatus === 'Approved'}
+              disabled={isBusy || currentStatus !== 'Pending Review'}
               className="px-5 py-2.5 rounded-full bg-primary text-on-primary font-label-ui hover:bg-primary/90 transition-all shadow-sm flex items-center gap-2 disabled:opacity-60"
             >
               <span className="material-symbols-outlined text-[18px]">
-                {isApproving ? 'sync' : 'verified'}
+                {isBusy ? 'sync' : 'verified'}
               </span>
-              {isApproving ? 'Merging PR...' : currentStatus === 'Approved' ? 'PR Approved' : 'Approve & Merge PR'}
+              {isBusy ? 'Saving Decision…' : currentStatus === 'Approved' ? 'Patch Approved' : 'Approve Patch'}
             </button>
           </div>
         </div>

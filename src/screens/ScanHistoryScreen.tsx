@@ -1,22 +1,65 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { endpoints } from '../services/api';
+import type { ScanDto } from '../services/api';
 import type { ScreenId, SecurityScanRecord } from '../types';
-import { mockSecurityScans } from '../services/mockData';
 
 interface ScanHistoryScreenProps {
   onNavigate: (screen: ScreenId) => void;
   onTriggerToast: (toast: { type: 'success' | 'info' | 'warning'; title: string; message: string }) => void;
+  currentProjectId: string | null;
 }
 
 export const ScanHistoryScreen: React.FC<ScanHistoryScreenProps> = ({
   onNavigate,
   onTriggerToast,
+  currentProjectId,
 }) => {
-  const [scans] = useState<SecurityScanRecord[]>(mockSecurityScans);
+  const [scans, setScans] = useState<SecurityScanRecord[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedScan, setSelectedScan] = useState<SecurityScanRecord | null>(null);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
-  const [scanAId, setScanAId] = useState<string>(mockSecurityScans[0].id);
-  const [scanBId, setScanBId] = useState<string>(mockSecurityScans[1].id);
+  const [scanAId, setScanAId] = useState<string>('');
+  const [scanBId, setScanBId] = useState<string>('');
+  const [diff, setDiff] = useState<{ resolved: number; new: number; persistent: number } | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+
+  const loadScans = useCallback(async () => {
+    const { scans: rows } = await endpoints.scans(currentProjectId ?? undefined);
+    const mapped: SecurityScanRecord[] = rows.map((s: ScanDto) => ({
+      id: s.id,
+      project: s.project,
+      scanType: s.scanType as SecurityScanRecord['scanType'],
+      startTime: s.startTime,
+      duration: s.duration,
+      status: s.status,
+      findingsCount: s.findingsCount,
+      criticalCount: s.criticalCount,
+      highCount: s.highCount,
+      trigger: s.trigger as SecurityScanRecord['trigger'],
+      commitHash: s.commitHash,
+      logs: s.logs,
+    }));
+    setScans(mapped);
+    if (!scanAId) setScanAId(mapped[mapped.length - 1]?.id ?? '');
+    if (!scanBId) setScanBId(mapped[0]?.id ?? '');
+  }, [currentProjectId]);
+
+  useEffect(() => {
+    loadScans().catch(() => undefined);
+  }, [loadScans]);
+
+  const runDiff = async () => {
+    if (!scanAId || !scanBId) return;
+    setDiffLoading(true);
+    try {
+      const res = await endpoints.scanDiff(scanAId, scanBId);
+      setDiff({ resolved: res.resolved, new: res.new, persistent: res.persistent });
+    } catch {
+      setDiff(null);
+    } finally {
+      setDiffLoading(false);
+    }
+  };
 
   const filteredScans = scans.filter(
     (s) =>
@@ -49,12 +92,29 @@ export const ScanHistoryScreen: React.FC<ScanHistoryScreenProps> = ({
 
         <div className="flex items-center gap-2">
           <button
-            onClick={() => {
-              onTriggerToast({
-                type: 'info',
-                title: 'Export Initialized',
-                message: 'Exported historical scan audit records as JSON manifest.',
-              });
+            onClick={async () => {
+              try {
+                const resp = await fetch(endpoints.scansExportUrl(), { credentials: 'include' });
+                if (!resp.ok) throw new Error();
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'healforge-scan-manifest.json';
+                a.click();
+                URL.revokeObjectURL(url);
+                onTriggerToast({
+                  type: 'success',
+                  title: 'Scan Manifest Downloaded',
+                  message: 'Historical scan audit records exported as a JSON manifest from the server.',
+                });
+              } catch {
+                onTriggerToast({
+                  type: 'warning',
+                  title: 'Export Failed',
+                  message: 'Could not download the scan manifest.',
+                });
+              }
             }}
             className="px-3.5 py-2 rounded-xl bg-surface-container hover:bg-surface-container-high border border-border-subtle text-xs font-semibold text-text-primary flex items-center gap-1.5 transition-all"
           >
@@ -286,9 +346,9 @@ export const ScanHistoryScreen: React.FC<ScanHistoryScreenProps> = ({
                     Resolved Findings
                   </span>
                   <span className="text-2xl font-bold font-headline-sm text-status-success mt-1 block">
-                    -2
+                    -{diff ? diff.resolved : '—'}
                   </span>
-                  <span className="text-[10px] text-text-muted mt-0.5 block">Neutralized by AST patch</span>
+                  <span className="text-[10px] text-text-muted mt-0.5 block">Present in A, absent in B</span>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-status-critical/10 border border-status-critical/20 text-center">
@@ -296,9 +356,9 @@ export const ScanHistoryScreen: React.FC<ScanHistoryScreenProps> = ({
                     New Findings Introduced
                   </span>
                   <span className="text-2xl font-bold font-headline-sm text-status-critical mt-1 block">
-                    +1
+                    +{diff ? diff.new : '—'}
                   </span>
-                  <span className="text-[10px] text-text-muted mt-0.5 block">Identified in branch commit</span>
+                  <span className="text-[10px] text-text-muted mt-0.5 block">Present in B, absent in A</span>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-surface-container/40 border border-border-subtle text-center">
@@ -306,11 +366,21 @@ export const ScanHistoryScreen: React.FC<ScanHistoryScreenProps> = ({
                     Persistent Vulnerabilities
                   </span>
                   <span className="text-2xl font-bold font-headline-sm text-text-primary mt-1 block">
-                    2
+                    {diff ? diff.persistent : '—'}
                   </span>
                   <span className="text-[10px] text-text-muted mt-0.5 block">Unchanged across runs</span>
                 </div>
               </div>
+
+              {!diff && (
+                <button
+                  onClick={runDiff}
+                  disabled={diffLoading || !scanAId || !scanBId}
+                  className="w-full py-2.5 rounded-xl bg-primary hover:bg-primary-container text-on-primary text-xs font-semibold disabled:opacity-40"
+                >
+                  {diffLoading ? 'Computing differential…' : 'Compute Differential (server-side)'}
+                </button>
+              )}
 
               <div className="p-3 rounded-xl bg-surface-container/30 border border-border-subtle text-xs text-text-secondary flex justify-between">
                 <span>Baseline: <strong>{scanA.project}</strong> ({scanA.id})</span>

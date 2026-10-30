@@ -6,6 +6,8 @@ interface SidebarNavigationProps {
   onNavigate: (screen: ScreenId) => void;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
+  /** Real workspace counts from the backend; badges hide when absent. */
+  counts?: { repositories: number; vulnerabilities: number; patchReviews: number; verifiedFixes: number };
 }
 
 interface NavItem {
@@ -13,6 +15,7 @@ interface NavItem {
   label: string;
   icon: string;
   badge?: string | number;
+  badgeKey?: 'repositories' | 'vulnerabilities' | 'patchReviews' | 'verifiedFixes';
   badgeType?: 'critical' | 'warning' | 'info' | 'success';
 }
 
@@ -30,9 +33,9 @@ const NAVIGATION_GROUPS: NavGroup[] = [
     icon: 'folder_open',
     items: [
       { id: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
-      { id: 'repositories', label: 'Repositories & Projects', icon: 'source', badge: 4, badgeType: 'info' },
+      { id: 'repositories', label: 'Repositories & Projects', icon: 'source', badgeKey: 'repositories', badgeType: 'info' },
       { id: 'bug-report', label: 'Bug Report', icon: 'bug_report' },
-      { id: 'vulnerabilities', label: 'Vulnerabilities', icon: 'pest_control', badge: 2, badgeType: 'critical' },
+      { id: 'vulnerabilities', label: 'Vulnerabilities', icon: 'pest_control', badgeKey: 'vulnerabilities', badgeType: 'critical' },
     ],
   },
   {
@@ -42,7 +45,7 @@ const NAVIGATION_GROUPS: NavGroup[] = [
     items: [
       { id: 'security-scans', label: 'Security Scans', icon: 'radar' },
       { id: 'code-explorer', label: 'Code Explorer', icon: 'terminal' },
-      { id: 'patch-review', label: 'Patch Review', icon: 'code', badge: 1, badgeType: 'warning' },
+      { id: 'patch-review', label: 'Patch Review', icon: 'code', badgeKey: 'patchReviews', badgeType: 'warning' },
       { id: 'agent-activity', label: 'Agent Activity', icon: 'neurology' },
     ],
   },
@@ -52,7 +55,7 @@ const NAVIGATION_GROUPS: NavGroup[] = [
     icon: 'verified',
     items: [
       { id: 'verification', label: 'Verification & Sandbox', icon: 'gvisor' },
-      { id: 'verified-fixes', label: 'Verified Fixes', icon: 'check_circle', badge: 3, badgeType: 'success' },
+      { id: 'verified-fixes', label: 'Verified Fixes', icon: 'check_circle', badgeKey: 'verifiedFixes', badgeType: 'success' },
       { id: 'scan-history', label: 'Scan History', icon: 'history' },
       { id: 'security-intelligence', label: 'Security Intelligence', icon: 'insights' },
       { id: 'reports-audit', label: 'Reports & Audit Trail', icon: 'description' },
@@ -78,6 +81,7 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
   onNavigate,
   isOpenMobile = false,
   onCloseMobile,
+  counts,
 }) => {
   // Collapsible group state: default all open
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
@@ -195,8 +199,8 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
                             <span className="truncate">{item.label}</span>
                           </div>
 
-                          {/* Data Badge */}
-                          {item.badge !== undefined && (
+                          {/* Data Badge (real workspace counts) */}
+                          {item.badgeKey && counts && (item.badgeKey === 'repositories' ? counts.repositories > 0 : counts[item.badgeKey] > 0) && (
                             <span
                               className={`ml-2 px-1.5 py-0.2 text-[10px] font-mono font-bold rounded shrink-0 ${
                                 isActive
@@ -210,7 +214,7 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
                                   : 'bg-white/10 text-secondary-fixed-dim'
                               }`}
                             >
-                              {item.badge}
+                              {counts && item.badgeKey ? counts[item.badgeKey] : item.badge}
                             </span>
                           )}
                         </button>
