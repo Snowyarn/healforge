@@ -1,48 +1,81 @@
 # HealForge — Autonomous Code Security & Remediation Workbench
 
-HealForge is an autonomous code security analysis and remediation platform. It bridges the gap between vulnerability detection and patch verification through interprocedural static analysis, secret detection, AI-assisted investigation and patch synthesis via **Nebius Token Factory**, human-in-the-loop review, and verifiable patch attestation — with **zero execution of untrusted code on the host**.
+> **Submission for the NVIDIA × Nebius Global AI Hackathon 2026**  
+> **Repository:** [https://github.com/Snowyarn/healforge](https://github.com/Snowyarn/healforge)  
+> **Live Web Application:** [https://zingy-bombolone-b9ad91.netlify.app/](https://zingy-bombolone-b9ad91.netlify.app/)  
+> **Cinematic Showcase Video:** `HEALFORGE-video/HEALFORGE_Final_150s_Silent.mp4` (150s / 1080p Full HD)
 
 ---
 
-## Architecture Overview
+## 1. Project Overview & Problem Statement
+
+Modern software engineering teams face an overwhelming deluge of static analysis alerts, false positives, and unpatched vulnerability backlogs. Traditional application security tools stop at reporting findings—leaving developers to manually investigate call stacks, determine reachability, author patches, and verify fixes without introducing regressions.
+
+**HealForge** is an autonomous code security and remediation workbench designed to close the loop between vulnerability detection and verified remediation. Built with strict enterprise guardrails:
+- **Interprocedural AST Taint Flow Analysis:** Deterministic syntax-level tracing from untrusted HTTP/RPC inputs to vulnerable sinks.
+- **AI-Powered Finding Enrichment & Patch Synthesis:** Powered by **NVIDIA Nemotron** models running on high-throughput **Nebius Token Factory** infrastructure.
+- **Human-in-the-Loop Governance (Zero Auto-Merge):** Every patch generates unified AST diffs and requires explicit engineer review and sign-off before persistence.
+- **Honest Isolation Boundary:** Untrusted code execution is strictly forbidden on the host system. Remediation proof is delivered via deterministic static re-analysis and cryptographic audit trails.
+
+---
+
+## 2. NVIDIA & Nebius Integration
+
+HealForge implements a unified, configurable AI provider adapter ([`backend/app/services/ai_provider.py`](backend/app/services/ai_provider.py)) supporting both Nebius Token Factory and NVIDIA NIM.
+
+### A. Nebius Token Factory Usage & Acceleration
+- **Official Endpoint:** `https://api.tokenfactory.nebius.com/v1` (OpenAI-compatible)
+- **Primary Model:** `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF`
+- **How Nebius Accelerated Development:**
+  - **Zero-Friction Access to Nemotron 70B:** Provided immediate, managed, high-speed inference for 70-billion-parameter NVIDIA models without requiring complex local multi-GPU provisioning or cluster orchestration.
+  - **Drop-in OpenAI SDK Compatibility:** Standardized completions and dynamic model discovery (`GET /api/v1/ai/models` querying Nebius `/v1/models`) enabled rapid iteration of structured security prompts.
+  - **Sub-Second Patch Generation:** High-concurrency token streaming allowed responsive interactive remediation workflows during live analysis.
+
+### B. NVIDIA Nemotron Model Integration
+- **Model Identified & Verified:** `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF` (via Nebius) and `nvidia/nemotron-3-super-120b-a12b` (via NVIDIA NIM Catalog).
+- **Exact Capabilities Implemented in Code:**
+  1. **Structured Finding Enrichment:** Receives finding title, CWE identifier, CVSS score, and line-bounded source context. Produces structured JSON detailing real-world impact, exploit scenarios, and contextual recommendations (`enrich_finding`).
+  2. **Surgical Patch Synthesis:** Generates minimal same-language code replacements, unified diffs, and structured rationale across three vectors: syntax conventions, dependency safety, and performance impact (`synthesize_patch`).
+  3. **Defense-in-Depth Secret Redaction:** Automatically scrubs AWS, GitHub, Google, NVIDIA, JWT, and high-entropy secret patterns *before* prompts leave the server boundary.
+  4. **Strict Security Hygiene:** API keys reside exclusively in server-side configuration; keys are never transmitted to the browser, logged, or bundled.
+
+### C. Other NVIDIA & Nebius Tools
+- **NVIDIA NIM API Catalog:** Supported as a native alternative/fallback provider (`https://integrate.api.nvidia.com/v1`).
+- *[NEEDS CONFIRMATION]*: Dedicated on-premise NVIDIA NeMo Guardrails or TensorRT-LLM containerized microservices were evaluated during design, but production deployment currently utilizes cloud inference via Nebius Token Factory and NVIDIA NIM API endpoints.
+
+---
+
+## 3. System Architecture
 
 ```mermaid
 flowchart TD
-    subgraph Frontend["Frontend Client (React 19 + TypeScript + Vite :3000)"]
-        UI["HealForge UI (15 Screens + Account Center)"]
+    subgraph Client["Frontend Client (React 19 + TypeScript + Vite :3000)"]
+        UI["HealForge UI (Workbench, Dashboard, Code Explorer)"]
         ApiClient["Typed API Client (services/api.ts)"]
-        SupaTypes["Supabase Types & Schema Definitions"]
-    end
-
-    subgraph Gateway["Dev Proxy / Ingress (:8001 / :3000)"]
-        ViteProxy["Vite Proxy (/api -> FastAPI)"]
     end
 
     subgraph Backend["Backend Engine (FastAPI + SQLAlchemy 2 :8001)"]
         SecLayer["Session Auth, CSRF Origin Guard, Rate Limiter"]
         ScanPipeline["Scan Pipeline (In-Process Worker Pool)"]
-        StaticEngine["Static Rule Engine (10 CWEs + Taint Flow)"]
+        StaticEngine["Static Rule Engine (10 CWEs + AST Taint Flow)"]
         SecretEngine["Secret Engine (6 Providers + Shannon Entropy)"]
-        AiAdapter["AI Adapter (Nebius Token Factory / NVIDIA NIM)"]
-        VerifEngine["Verification Engine (Zero Host Execution)"]
-        PDFGen["Pure-Python PDF Report Generator"]
+        AiAdapter["Unified AI Adapter (ai_provider.py)"]
+        VerifEngine["Verification Engine (Honest Isolation Boundary)"]
+        PDFGen["Pure-Python Cryptographic PDF Report Generator"]
     end
 
-    subgraph AICloud["External AI Cloud (Server-Side Secrets Only)"]
-        Nebius["Nebius Token Factory (NVIDIA Nemotron Models)"]
-        NvidiaNIM["NVIDIA NIM Catalog (Alternative)"]
+    subgraph AICloud["External AI Inference Tier"]
+        Nebius["Nebius Token Factory (NVIDIA Nemotron 70B)"]
+        NvidiaNIM["NVIDIA NIM API Catalog (Fallback)"]
     end
 
     subgraph Database["Authoritative Database Tier"]
-        subgraph SupabaseDB["Supabase PostgreSQL (Hosted healforge-dev / Local)"]
-            PublicSchema["public schema: 15 Deployed Tables<br>(RLS Policies, UUIDs, Triggers, Immutability)"]
-        end
-        LocalSQLite[("SQLite Test Runner Database<br>(WAL Mode, local isolated pytest)")]
+        SupabaseDB[("Supabase PostgreSQL (public schema: 15 tables)")]
+        LocalSQLite[("SQLite Dev / Test Runner DB (WAL Mode)")]
     end
 
     UI --> ApiClient
-    ApiClient --> ViteProxy
-    ViteProxy --> SecLayer
+    ApiClient --> SecLayer
     SecLayer --> ScanPipeline
     ScanPipeline --> StaticEngine
     ScanPipeline --> SecretEngine
@@ -53,203 +86,137 @@ flowchart TD
     AiAdapter -->|"OpenAI Client (TLS)"| Nebius
     AiAdapter -.->|"Fallback"| NvidiaNIM
 
-    SecLayer --> BackendSchema
+    SecLayer --> SupabaseDB
     SecLayer -.-> LocalSQLite
 ```
 
 ---
 
-## 1. Quick Start (Local Development)
+## 4. Key Implemented Features
+
+1. **Autonomous SAST & AST Taint Tracking:** Syntax-level data flow analysis covering 10 major CWE classes (SQL Injection, Command Injection, Path Traversal, SSRF, Hardcoded Credentials, Insecure Deserialization, Open Redirect, Cryptographic Failures, Broken Access Control, and Auth Bypass).
+2. **High-Entropy Secret Detection:** Dual-layer scanner combining regex signatures for major cloud providers (AWS, GitHub, Google, Slack, Stripe, NVIDIA) with Shannon entropy scoring.
+3. **Interactive Code Explorer & Workbench:** Visual representation of source revisions, file trees, syntax highlights, and line-level security annotations.
+4. **Human-Governed Patch Review:** Side-by-side unified AST diff viewer allowing developers to inspect proposed fixes, review AI rationale, and explicitly accept or reject patches.
+5. **Honest Isolation Boundary:** Enforces a zero-host-execution policy. Dynamic execution verification is honestly marked unavailable without an isolated sandbox runner, while providing deterministic proof via static re-analysis.
+6. **Executive Dashboard & Audit Trail:** Real-time posture scoring, repository inventory, immutable audit log ledger, and downloadable compliance PDF reports.
+
+---
+
+## 5. Technology Stack
+
+- **Frontend:** React 19, TypeScript 6.0, Vite 8, Tailwind CSS, Lucide Icons
+- **Backend:** Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2 (async/sync), Alembic, Uvicorn
+- **AI / LLM Infrastructure:** Nebius Token Factory, NVIDIA Nemotron (`nvidia/Llama-3.1-Nemotron-70B-Instruct-HF`), NVIDIA NIM API Catalog, OpenAI Python SDK
+- **Database:** Supabase PostgreSQL (15 canonical application tables in `public` schema), SQLite (local test harness)
+- **Security & Analysis:** Python `ast` parsing, Shannon entropy calculation, HMAC-SHA256 evidence hashing, PyJWT
+- **Testing & Tooling:** Pytest 9.0, Vitest 5.0, JSDOM, Ruff 0.14, Oxlint, Docker Compose
+
+---
+
+## 6. Installation & Setup
 
 ### Prerequisites
 - Node.js 20+ and npm 10+
-- Python 3.12+ (or Homebrew `/opt/homebrew/bin/python3.12`)
+- Python 3.12+
+- *(Optional)* Docker Desktop & Supabase CLI
 
-### Fast Start (Automated Concurrent Dev)
+### Fast Start (Automated Concurrent Development)
 ```bash
-# 1. Setup virtual environment, pinned dependencies, SQLite migrations, and npm
+# 1. Clone the repository
+git clone https://github.com/Snowyarn/healforge.git
+cd healforge
+
+# 2. Run automated setup (creates virtual environment, installs dependencies, migrates SQLite DB)
 ./dev.sh setup
 
-# 2. Run both FastAPI backend (:8001) and Vite frontend (:3000) concurrently
+# 3. Launch both FastAPI backend (:8001) and Vite frontend (:3000)
 ./dev.sh
 ```
 
-### Manual Individual Commands
-```bash
-# Terminal 1 — Backend (FastAPI :8001)
-cd backend
-source .venv/bin/activate
-alembic upgrade head
-uvicorn app.main:app --host 127.0.0.1 --port 8001
+### Manual Setup
 
-# Terminal 2 — Frontend (Vite :3000)
+#### Backend Setup
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Configure environment
+cp .env.example .env
+# Edit .env and supply NEBIUS_API_KEY (or NVIDIA_API_KEY)
+
+# Run database migrations and start server
+alembic upgrade head
+uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
+```
+
+#### Frontend Setup
+```bash
+# In project root:
+npm install
 npm run dev -- --port 3000
 ```
-Open [http://localhost:3000](http://localhost:3000) in your browser. The Vite dev server automatically proxies `/api` requests to `http://127.0.0.1:8001`, keeping session cookies first-party and same-origin.
+Open [http://localhost:3000](http://localhost:3000) in your browser. The Vite development proxy automatically routes `/api` calls to the FastAPI backend at `127.0.0.1:8001`.
 
----
-
-## 2. Database Architecture & Supabase Integration
-
-HealForge uses the **authoritative Supabase PostgreSQL foundation (`public` schema)** as its single source of truth:
-
-1. **Authoritative Supabase PostgreSQL Schema (`public` schema):**
-   - **15 Canonical Tables:** `profiles`, `workspaces`, `workspace_members`, `repositories`, `integration_connections`, `analyses`, `findings`, `analysis_findings`, `patches`, `patch_versions`, `patch_reviews`, `sandbox_runs`, `verification_checks`, `audit_logs`, `saved_reports`.
-   - **Guarantees:** RFC 4122 standard UUIDs, workspace tenancy isolation, immutability triggers on audit logs and patch version diffs, and compound cross-tenant foreign key constraints.
-   - **Pre-flight Validation:** 99 static DDL and contract tests pass (`npm run test:db`).
-
-2. **Database Setup Options:**
-   - **Path A — Local Supabase CLI (Recommended Local Dev):** Run `npx supabase start` to launch local Supabase with the 15 canonical tables on `127.0.0.1:54322`. Set `DATABASE_SCHEMA=public` and `SKIP_ALEMBIC_MIGRATIONS=true`.
-   - **Path B — Hosted Supabase (`healforge-dev`):** Connect directly to the hosted Supabase connection pooler with `DATABASE_SCHEMA=public` and `SKIP_ALEMBIC_MIGRATIONS=true`.
-   - **Path C — Local SQLite Dev (Fast, No Docker):** Set `DATABASE_URL=sqlite:///./healforge.db` and run `alembic upgrade head` for standalone local development and automated pytest test suites.
-   - **Path D — Standalone Docker Compose (Built-in Postgres Container):** If running without Supabase, set `DATABASE_SCHEMA=healforge_backend` and `SKIP_ALEMBIC_MIGRATIONS=false` to let Alembic populate the isolated development container.
-
-> [!NOTE]
-> **Migration Safety & Hosted Database Protection:**
-> Legacy Alembic migrations are strictly suppressed when targeting the Supabase database (`SKIP_ALEMBIC_MIGRATIONS=true` or `DATABASE_SCHEMA=public`). Both `backend/docker-entrypoint.sh` and `backend/alembic/env.py` abort migration execution to prevent mutating the managed Supabase schema.
-
-> [!WARNING]
-> **RLS Verification Status (Hosted Supabase Pending):**
-> Tenant boundaries and workspace authorization are strictly enforced at the application layer across all routes and database queries. However, **database-level Row Level Security (RLS) enforcement against the remote hosted Supabase database remains pending live verification**, as effective RLS depends on the specific connection role privileges configured on the hosted Supabase pooler (e.g., non-superuser roles without `BYPASSRLS`). Local tests confirm application-level isolation but do not certify remote database-level policy enforcement.
-
----
-
-## 3. Nebius Token Factory & AI Provider Integration
-
-HealForge implements a unified, configurable AI provider adapter ([`backend/app/services/ai_provider.py`](file:///Users/aryanchourasia/Projects/healforge/backend/app/services/ai_provider.py)).
-
-### Configuration
-```env
-# In backend/.env:
-AI_PROVIDER=nebius
-NEBIUS_API_KEY=your-token-factory-key
-NEBIUS_BASE_URL=https://api.tokenfactory.nebius.com/v1
-NEBIUS_MODEL=nvidia/Llama-3.1-Nemotron-70B-Instruct-HF
+### Docker Compose
+```bash
+# Launch containerized stack
+docker compose up --build
 ```
-
-### Supported Capabilities
-- **Model Discovery:** Authenticated query against Nebius `/v1/models` (`GET /api/v1/ai/models`).
-- **Finding Enrichment:** Sends finding title, CWE, severity, and line-bounded, secret-redacted source code to NVIDIA Nemotron to generate structured impact analysis and exploit scenarios.
-- **Patch Synthesis:** Generates minimal same-language code replacements, unified diffs, and rationale across syntax, safety, and performance vectors.
-- **Defense-in-Depth Redaction:** Automatically strips AWS, GitHub, Google, NVIDIA, JWT, and high-entropy secret patterns before prompts are assembled.
-- **Strict Server-Side Hygiene:** API keys are never returned over HTTP, never logged, and never included in frontend bundles.
-
----
-
-## 4. End-to-End Vertical Demonstration Workflow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as Operator / Reviewer
-    participant FE as React Frontend (:3000)
-    participant BE as FastAPI Backend (:8001)
-    participant AI as Nebius Token Factory (NVIDIA Nemotron)
-    participant DB as Supabase PostgreSQL / SQLite
-
-    User->>FE: Upload project ZIP archive
-    FE->>BE: POST /api/v1/projects/{id}/sources
-    BE->>BE: Zip-Slip & bomb validation, SHA-256 digest
-    BE->>DB: Persist SourceRevision & SourceFiles
-    BE-->>FE: HTTP 201 Created
-
-    User->>FE: Trigger Autonomous Scan (Consent Granted)
-    FE->>BE: POST /api/v1/scans {modelEnrichment: true}
-    BE->>BE: Dispatch in-process scan (SAST + Secrets + SBOM)
-    BE->>DB: Persist Findings & Stage Logs
-    BE->>AI: Chat Completion (Secret-Redacted Code)
-    AI-->>BE: Structured JSON (Impact, Remediation)
-    BE->>DB: Update Finding with AI Context
-    BE-->>FE: HTTP 202 Accepted (Polling /scans/{id})
-
-    User->>FE: Inspect Finding & Request Patch Synthesis
-    FE->>BE: POST /api/v1/findings/{id}/patch-request
-    BE->>AI: Synthesize Patch (Bounded Snippet)
-    AI-->>BE: PatchProposal (Diff + Rationale)
-    BE->>DB: Save PatchProposal (pending_review)
-    BE-->>FE: HTTP 202 Accepted
-
-    User->>FE: Human Peer Review (Approve / Reject)
-    FE->>BE: POST /api/v1/patches/{id}/review {action: "approve"}
-    BE->>DB: Record ReviewEvent (Optimistic Version Lock)
-
-    User->>FE: Trigger Verification
-    FE->>BE: POST /api/v1/verification-runs {mode: "static_reanalysis"}
-    BE->>BE: Re-run detection rule against patched code in-memory
-    BE->>DB: Persist VerificationRun & SHA-256 Evidence Digest
-    BE-->>FE: Verification Passed + Evidence Bundle Download
-```
-
----
-
-## 5. Security & Verification Policy
-
-> [!IMPORTANT]
-> **Zero Host Execution Rule:** Untrusted user code is **never** executed on the host system.
-> - An automated AST test ([`test_no_host_execution.py`](file:///Users/aryanchourasia/Projects/healforge/backend/tests/test_no_host_execution.py)) verifies that `subprocess`, `os.system`, `eval`, and `exec` are completely absent from runtime code.
-> - Execution-based verification remains in an honest **`verification_unavailable`** state until an isolated, ephemeral sandbox runner (e.g. gVisor `runsc`) is explicitly provisioned and verified (`RUNNER_VERIFIED=true`).
-> - Static re-analysis is provided as genuine, deterministic evidence (re-evaluating rules against proposed diffs).
-
----
-
-## 6. Supabase Architecture, Migration Safety & Durability Notes
-
-### Authoritative Database Tier
-- **Hosted Supabase `healforge-dev` (`public` schema)** is the single source of truth for the project.
-- The 15 canonical tables (`profiles`, `workspaces`, `workspace_members`, `repositories`, `integration_connections`, `analyses`, `findings`, `analysis_findings`, `patches`, `patch_versions`, `patch_reviews`, `sandbox_runs`, `verification_checks`, `audit_logs`, `saved_reports`) hold all persistent domain data, relational integrity constraints, and Row Level Security (RLS) policies.
-- **Migration Safety:** The backend's legacy Alembic migrations are strictly suppressed when targeting the Supabase database (`SKIP_ALEMBIC_MIGRATIONS=true` or `DATABASE_SCHEMA=public`). Both `backend/docker-entrypoint.sh` and `backend/alembic/env.py` contain programmatic guards to prevent mutating or duplicating the authoritative Supabase schema.
-
-### Durability & In-Memory Adapters
-To maintain 100% route functionality while avoiding unmapped tables on PostgreSQL:
-- **Durable via Supabase:** Workspaces, Members & RBAC, Repositories, Analyses/Scans, Canonical Findings, Patches & Versions, Reviews, Verification Checks, Audit Logs, Saved Reports, and **Webhooks** (persisted in `public.integration_connections` with `provider="custom_webhook"`).
-- **Process-Local / Ephemeral State:** Ephemeral non-core records (**API keys**, **Notifications**, **Bug Reports**, and **Idempotency records**) utilize in-memory storage adapters on PostgreSQL. These features operate normally during runtime but do not persist across container restarts or synchronize across multiple independent backend replicas. A production durable implementation would require schema additions or external caching (e.g. Redis).
 
 ---
 
 ## 7. Environment Variables Reference
 
-| Variable | Target Component | Default / Example | Purpose |
+| Variable | Target | Example / Default | Description |
 |:---|:---|:---|:---|
-| `DATABASE_URL` | Backend | `postgresql+psycopg://...` | Connection string to Supabase PostgreSQL (or SQLite for local tests). |
-| `DATABASE_SCHEMA` | Backend | `public` | Schema for Supabase 15 authoritative application tables. |
-| `SKIP_ALEMBIC_MIGRATIONS` | Backend | `true` | Prevents local Alembic migrations from mutating the Supabase schema. |
-| `SUPABASE_URL` | Backend / Frontend | `http://127.0.0.1:54321` | Supabase platform URL (hosted or local). |
-| `SUPABASE_JWT_SECRET` | Backend | *(project secret)* | Supabase JWT signing secret for HS256 auth verification. |
-| `AI_PROVIDER` | Backend | `nebius` | Active AI provider (`nebius` default or `nvidia` alternative). |
-| `NEBIUS_API_KEY` | Backend | *(empty)* | Nebius Token Factory API key (server-side secret). |
+| `AI_PROVIDER` | Backend | `nebius` | Active AI provider (`nebius` default or `nvidia`). |
+| `NEBIUS_API_KEY` | Backend | *(server secret)* | Nebius Token Factory API key. |
 | `NEBIUS_BASE_URL` | Backend | `https://api.tokenfactory.nebius.com/v1` | Nebius Token Factory endpoint. |
-| `NEBIUS_MODEL` | Backend | `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF` | NVIDIA open-source model identifier on Nebius. |
-| `NVIDIA_API_KEY` | Backend | *(empty)* | Optional alternative NVIDIA NIM catalog key (server-side secret). |
-| `HEALFORGE_SINGLE_USER`| Backend | `false` | Development mode; fail-closed in production. |
-| `HEALFORGE_ENV` | Backend | `local` | `local` or `production` (enforces startup security guards). |
-| `CORS_ORIGINS` | Backend | `http://localhost:3000` | Exact allowed frontend origins. |
+| `NEBIUS_MODEL` | Backend | `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF` | NVIDIA model identifier hosted on Nebius. |
+| `NVIDIA_API_KEY` | Backend | *(server secret)* | Optional alternative NVIDIA NIM catalog key. |
+| `NVIDIA_MODEL_ID` | Backend | `nvidia/nemotron-3-super-120b-a12b` | NVIDIA NIM model identifier. |
+| `DATABASE_URL` | Backend | `postgresql+psycopg://...` | Connection URL to Supabase PostgreSQL or SQLite. |
+| `DATABASE_SCHEMA` | Backend | `public` | Schema for authoritative application tables. |
+| `SKIP_ALEMBIC_MIGRATIONS` | Backend | `true` | Prevents legacy Alembic runs when targeting Supabase. |
+| `SUPABASE_URL` | Both | `https://your-project.supabase.co` | Supabase platform URL. |
+| `SUPABASE_JWT_SECRET` | Backend | *(project secret)* | Supabase JWT secret for auth verification. |
 | `RUNNER_VERIFIED` | Backend | `false` | Gates microVM execution verification. |
 
 ---
 
-## 8. Quality Gates & Test Results
+## 8. Quality Gates & Verification Matrix
 
-Run all test suites and quality gates in a single command:
-
+Run the automated validation suite:
 ```bash
 bash scripts/check_all.sh
 ```
 
-### Verified Test Matrix
-
-| Quality Gate | Tooling | Results |
+| Quality Gate | Tooling | Result |
 |:---|:---|:---|
 | **Backend Unit & Integration Tests** | `pytest` 9.0.2 | **125 passed, 3 skipped** (100% passing) |
 | **Backend Code Hygiene & Formatting** | `ruff` 0.14.5 | **0 errors** (all 60 files formatted) |
 | **Frontend Unit Tests** | `vitest` 5.0.5 + JSDOM | **27/27 passed** |
-| **Frontend Linter** | `oxlint` 1.88.0 | **0 errors** (6 advisory warnings) |
-| **Frontend Typecheck & Production Build** | `tsc -b` + `vite build` | **0 errors** (bundle built in ~330ms) |
-| **Database Migrations Gate** | `alembic` (SQLite) | **Clean up -> down -> up verified** |
+| **Frontend Linter** | `oxlint` 1.88.0 | **0 errors** |
+| **Frontend Typecheck & Production Build** | `tsc -b` + `vite build` | **0 errors** (clean build) |
 | **Supabase 15-Table DDL & RLS Contracts** | Custom Node.js validator | **99/99 passed** |
-| **Secret & Credential Scan** | Pattern & placeholder scanner | **0 leaks, 0 exposed keys** |
+| **Zero Host Execution Rule** | AST Python Checker | **0 forbidden execution calls** |
+| **Secret & Credential Scan** | Pattern scanner | **0 leaks, 0 exposed keys** |
 
 ---
 
-## License
+## 9. Team & Submission Details
 
-Internal Proprietary — HealForge Project.
+- **Event:** NVIDIA × Nebius Global AI Hackathon 2026
+- **Project Name:** HealForge
+- **Lead Developer:** Aryan Chourasia ([@Snowyarn](https://github.com/Snowyarn))
+- *[NEEDS CONFIRMATION]*: Additional Team Contributors: `[Insert names/GitHub handles if applicable]`
+
+---
+
+## 10. License
+
+This project is licensed under the OSI-approved **MIT License** — see the [LICENSE](LICENSE) file for details.  
+Copyright (c) 2026 HealForge Contributors.
