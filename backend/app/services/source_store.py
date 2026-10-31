@@ -58,6 +58,12 @@ _MEM_STORE: dict[str, sqlite3.Connection | None] = {"conn": None}
 def _get_conn() -> sqlite3.Connection:
     conn = _MEM_STORE["conn"]
     if conn is None:
+        try:
+            from ..db import init_db
+
+            init_db()
+        except Exception:  # noqa: S110, BLE001
+            pass
         if DB_PATH == ":memory:" or not DB_PATH:
             conn = sqlite3.connect(
                 "file:healforge_mem?mode=memory&cache=shared", uri=True, check_same_thread=False
@@ -135,7 +141,9 @@ def save_revision(
         conn.execute(
             """
             INSERT OR REPLACE INTO source_revisions
-            (id, project_id, digest, archive_filename, branch_label, size_bytes, file_count, text_file_count, total_text_bytes, created_by, created_at)
+            (id, project_id, digest, archive_filename, branch_label,
+             size_bytes, file_count, text_file_count, total_text_bytes,
+             created_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (

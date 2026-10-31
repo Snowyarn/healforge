@@ -15,4 +15,13 @@ _BACKEND = os.path.join(_ROOT, "backend")
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+from app.db import init_db  # noqa: E402
 from app.main import app  # noqa: E402
+
+__all__ = ["app"]
+
+# Ensure all in-memory database tables are created on Vercel cold starts before requests
+try:
+    init_db()
+except Exception as exc:  # noqa: BLE001
+    print(f"[api/index.py] init_db on cold start: {exc}", flush=True)

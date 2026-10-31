@@ -141,7 +141,30 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             finally:
                 db.close()
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+
+            err_str = f"{type(exc).__name__}: {exc}"
+            tb_str = traceback.format_exc()
+            print(f"[healforge-500] Unhandled exception: {err_str}\n{tb_str}", flush=True)
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": str(exc) or err_str,
+                    "error": {
+                        "code": "internal_error",
+                        "message": err_str,
+                        "request_id": request_id,
+                        "traceback": tb_str[:2000],
+                    },
+                },
+                headers={
+                    "X-Request-ID": request_id,
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
 
         # Transfer bootstrapped session cookie onto the real response.
         if bootstrapped is not None:
@@ -232,15 +255,22 @@ async def idempotency_conflict_handler(request: Request, exc: IdempotencyConflic
 
 @app.exception_handler(Exception)
 async def unhandled_handler(request: Request, exc: Exception):  # pragma: no cover
+    import traceback
+
     rid = getattr(request.state, "request_id", "")
+    err_str = f"{type(exc).__name__}: {exc}"
+    tb_str = traceback.format_exc()
+    print(f"[healforge-500] Unhandled exception: {err_str}\n{tb_str}", flush=True)
     return JSONResponse(
         status_code=500,
         content={
+            "detail": str(exc) or err_str,
             "error": {
                 "code": "internal_error",
-                "message": f"Unhandled server error ({type(exc).__name__}).",
+                "message": err_str,
                 "request_id": rid,
-            }
+                "traceback": tb_str[:2000],
+            },
         },
     )
 
@@ -270,7 +300,14 @@ def root() -> dict:
 
 @app.on_event("startup")
 def on_startup() -> None:
-    """Deployment guards + restart honesty."""
+    """Deployment guards + restart honesty + in-memory schema initialization."""
+    from .db import init_db
+
+    try:
+        init_db()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[healforge] startup init_db: {exc}", flush=True)
+
     validate_startup(settings)
     # Restart honesty: any scan job left queued/running by a previous process is
     # marked failed (the in-process job backend is not a durable queue).

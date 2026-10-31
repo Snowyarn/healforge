@@ -101,7 +101,13 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_db_url(cls, value: str) -> str:
         """Accept both SQLAlchemy URLs and Prisma-style file: URLs from the platform env."""
+        import os
+
         value = (value or "").strip()
+        # In Vercel serverless environment, if no external database is configured, fallback to in-memory SQLite
+        is_vercel = os.environ.get("VERCEL") == "1" or os.environ.get("VERCEL_ENV") is not None
+        if is_vercel and ("127.0.0.1:54322" in value or not value):
+            return "sqlite:///file:healforge_db?mode=memory&cache=shared&uri=true"
         if not value:
             return "sqlite:///./healforge.db"
         if value.startswith("file:"):
