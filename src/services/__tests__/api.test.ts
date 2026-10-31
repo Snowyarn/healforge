@@ -120,6 +120,26 @@ describe('api.postForm (source upload path)', () => {
   });
 });
 
+describe('auth and endpoints', () => {
+  it('calls logout endpoint with POST', async () => {
+    const fetchMock = stubFetch(async () => jsonResponse(200, { ok: true }));
+    const { endpoints } = await import('../api');
+    const res = await endpoints.logout();
+    expect(res).toEqual({ ok: true });
+    const [rawUrl, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(new URL(rawUrl).pathname).toBe('/api/v1/auth/logout');
+    expect(init.method).toBe('POST');
+  });
+
+  it('correctly maps 404 endpoint not found response', async () => {
+    stubFetch(async () => new Response('Not Found', { status: 404 }));
+    const { endpoints } = await import('../api');
+    const err = await endpoints.session().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(404);
+  });
+});
+
 describe('download URL builders', () => {
   it('build same-origin relative URLs so cookies apply', async () => {
     // Import dynamically to keep the module-shape check independent of fetch.

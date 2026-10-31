@@ -8,6 +8,7 @@ interface SidebarNavigationProps {
   onCloseMobile?: () => void;
   /** Real workspace counts from the backend; badges hide when absent. */
   counts?: { repositories: number; vulnerabilities: number; patchReviews: number; verifiedFixes: number };
+  onSignOut?: () => void;
 }
 
 interface NavItem {
@@ -82,6 +83,7 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
   isOpenMobile = false,
   onCloseMobile,
   counts,
+  onSignOut,
 }) => {
   // Collapsible group state: default all open
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
@@ -227,7 +229,7 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
           })}
         </nav>
 
-        {/* Exit to Homepage Action */}
+        {/* Exit & Sign Out Actions */}
         <div className="px-3 pt-3 border-t border-outline/20 space-y-1">
           <button
             onClick={() => handleSelectNav('home')}
@@ -236,6 +238,18 @@ export const SidebarNavigation: React.FC<SidebarNavigationProps> = ({
             <span className="material-symbols-outlined text-[18px]">home</span>
             <span>Return to Homepage</span>
           </button>
+          {onSignOut && (
+            <button
+              onClick={() => {
+                if (onCloseMobile) onCloseMobile();
+                onSignOut();
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-label-ui text-secondary-fixed-dim hover:text-status-critical hover:bg-status-critical/10 transition-colors"
+            >
+              <span className="material-symbols-outlined text-[18px]">logout</span>
+              <span>Sign Out</span>
+            </button>
+          )}
         </div>
 
         {/* Sidebar Footer */}

@@ -32,7 +32,7 @@ COOKIE_NAME = "healforge_session"
 def _is_sqlite(db: Session) -> bool:
     try:
         return str(db.bind.url).startswith("sqlite")
-    except Exception:
+    except Exception:  # noqa: BLE001
         return True
 
 
@@ -63,20 +63,54 @@ def verify_supabase_jwt(token: str) -> dict | None:
             options={"verify_aud": False},
         )
         return claims
-    except Exception:
-        return None
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+        if unverified_header.get("alg") == "ES256":
+            try:
+                from jwt import PyJWKClient
+
+                jwks_url = f"{settings.effective_supabase_url}/auth/v1/.well-known/jwks.json"
+                jwks_client = PyJWKClient(jwks_url)
+                signing_key = jwks_client.get_signing_key_from_jwt(token)
+                return jwt.decode(
+                    token,
+                    signing_key.key,
+                    algorithms=["ES256"],
+                    options={"verify_aud": False},
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+    return None
 
 
 def create_session(db: Session, response: Response, user: UserAccount, request: Request) -> AuthSession:
     """Issue a verified Supabase JWT and set the healforge_session cookie."""
     token = mint_supabase_jwt(user.id, user.email)
+    # Secure cookie flag: require HTTPS unless on local developer host
+    is_secure = False
+    if settings.healforge_env == "production" and request is not None:
+        client_host = request.headers.get("host", "") or (request.client.host if request.client else "")
+        is_local = "localhost" in client_host or "127.0.0.1" in client_host
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        is_secure = (proto == "https") or (not is_local)
+
+    samesite = settings.cookie_samesite.lower()
+    if samesite == "none":
+        is_secure = True
+
     response.set_cookie(
         COOKIE_NAME,
         token,
         max_age=settings.session_ttl_hours * 3600,
         httponly=True,
-        samesite="strict",
-        secure=settings.healforge_env == "production",
+        samesite=samesite,
+        secure=is_secure,
         path="/",
     )
     sess_id = new_id("ses")
@@ -92,7 +126,7 @@ def create_session(db: Session, response: Response, user: UserAccount, request: 
         try:
             db.add(sess)
             db.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
     return sess
 
@@ -127,7 +161,7 @@ def resolve_session(db: Session, request: Request | None) -> AuthSession | None:
                     if sess is not None:
                         sess.claims_email = user_email
                         return sess
-                except Exception:
+                except Exception:  # noqa: BLE001
                     db.rollback()
             sess = AuthSession(
                 id=user_id,
@@ -150,7 +184,7 @@ def resolve_session(db: Session, request: Request | None) -> AuthSession | None:
                 )
                 if sess is not None:
                     return sess
-            except Exception:
+            except Exception:  # noqa: BLE001
                 db.rollback()
         sess = AuthSession(
             id=new_id("ses"),
@@ -164,7 +198,7 @@ def resolve_session(db: Session, request: Request | None) -> AuthSession | None:
                 db.commit()
                 db.refresh(sess)
                 return sess
-            except Exception:
+            except Exception:  # noqa: BLE001
                 db.rollback()
         return sess
 
@@ -179,7 +213,7 @@ def revoke_session(db: Session, session_id: str) -> bool:
             if sess is not None:
                 sess.revoked_at = utcnow()
                 db.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
     return True
 
@@ -203,7 +237,7 @@ def get_auth(db: Session, request: Request = None) -> AuthContext | None:
     profile = None
     try:
         profile = db.get(Profile, sess.user_id)
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
 
     if profile is None:
@@ -211,7 +245,7 @@ def get_auth(db: Session, request: Request = None) -> AuthContext | None:
         if user_email:
             try:
                 profile = db.query(Profile).filter(Profile.email == user_email).first()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 db.rollback()
 
     if profile is None:
@@ -230,19 +264,23 @@ def get_auth(db: Session, request: Request = None) -> AuthContext | None:
                 db.add(profile)
                 db.commit()
                 db.refresh(profile)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 db.rollback()
                 profile = db.get(Profile, sess.user_id)
 
-    if profile is None:
+    allow_single_user = settings.healforge_single_user and (
+        settings.healforge_env != "production" or settings.healforge_allow_single_user_in_production
+    )
+
+    if profile is None and allow_single_user:
         try:
             # Fallback query by email if default dev user
             profile = db.query(Profile).filter(Profile.email == settings.healforge_default_user_email).first()
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
 
     if profile is None:
-        if settings.healforge_single_user:
+        if allow_single_user:
             profile = ensure_default_profile(db)
         else:
             return None
@@ -255,7 +293,7 @@ def get_auth(db: Session, request: Request = None) -> AuthContext | None:
     if _is_sqlite(db):
         try:
             user = db.query(UserAccount).filter(UserAccount.id == profile.id).first()
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
     if user is None:
         user = UserAccount(
@@ -268,7 +306,7 @@ def get_auth(db: Session, request: Request = None) -> AuthContext | None:
             try:
                 db.add(user)
                 db.commit()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 db.rollback()
     else:
         user.role = role
@@ -287,7 +325,7 @@ def _resolve_workspace_and_role(
         ws = None
         try:
             ws = db.query(Workspace).filter(Workspace.id == requested_id_str).first()
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
         if ws is not None:
             # 1. Owner of requested workspace
@@ -308,7 +346,7 @@ def _resolve_workspace_and_role(
                     )
                     if tm is not None:
                         return ws, tm.role
-                except Exception:
+                except Exception:  # noqa: BLE001
                     db.rollback()
             # 3. Check WorkspaceMember in requested workspace
             try:
@@ -332,7 +370,7 @@ def _resolve_workspace_and_role(
                         "viewer": "Viewer",
                     }
                     return ws, role_map.get(wm.role.lower(), wm.role.capitalize())
-            except Exception:
+            except Exception:  # noqa: BLE001
                 db.rollback()
 
     # Default to user's owned workspace
@@ -340,7 +378,7 @@ def _resolve_workspace_and_role(
         ws = db.query(Workspace).filter(Workspace.owner_id == user_id_str).first()
         if ws is not None:
             return ws, "Owner"
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
 
     # Next check any active membership (SQLite only for TeamMember)
@@ -360,7 +398,7 @@ def _resolve_workspace_and_role(
                 ws = db.query(Workspace).filter(Workspace.id == tm.workspace_id).first()
                 if ws is not None:
                     return ws, tm.role
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
 
     try:
@@ -377,7 +415,7 @@ def _resolve_workspace_and_role(
             ws = db.query(Workspace).filter(Workspace.id == wm.workspace_id).first()
             if ws is not None:
                 return ws, wm.role.capitalize()
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
 
     # If the user has no owned or member workspace, provision their personal workspace
@@ -394,7 +432,7 @@ def _resolve_workspace_and_role(
         db.refresh(ws)
         ensure_owner_membership(db, UserAccount(id=user_id_str, email="", username="user"), ws)
         return ws, "Owner"
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
         # In single-user dev mode fallback to first workspace
         if settings.healforge_single_user:
@@ -441,7 +479,9 @@ def user_workspaces(db: Session, user: UserAccount) -> list[dict]:
 
 
 def ensure_default_profile(db: Session) -> Profile:
-    """Ensure a default profile exists for local development."""
+    """Ensure a default profile exists for local single-user development."""
+    if settings.healforge_env == "production" and not settings.healforge_allow_single_user_in_production:
+        raise RuntimeError("Single-user bootstrap is disabled in production mode.")
     user_id = uuid.UUID(settings.healforge_default_user_id)
     profile = db.get(Profile, user_id)
     if profile is not None:
@@ -465,6 +505,8 @@ def ensure_default_profile(db: Session) -> Profile:
 
 def ensure_default_user(db: Session) -> UserAccount:
     """Compatibility helper for single-user dev bootstrapping."""
+    if settings.healforge_env == "production" and not settings.healforge_allow_single_user_in_production:
+        raise RuntimeError("Single-user bootstrap is disabled in production mode.")
     profile = ensure_default_profile(db)
     return UserAccount(
         id=profile.id,
@@ -515,12 +557,71 @@ def ensure_owner_membership(db: Session, user: UserAccount, workspace: Workspace
                     status="Active",
                 )
                 db.add(tm)
-        except Exception:
+        except Exception:  # noqa: BLE001
             db.rollback()
 
     try:
         db.commit()
         db.refresh(member)
-    except Exception:
+    except Exception:  # noqa: BLE001
         db.rollback()
     return member
+
+
+def ensure_user_workspace(db: Session, user_id: uuid.UUID | str, username: str | None = None) -> tuple[Workspace, str]:
+    """Ensure the user owns an active Workspace and has an owner WorkspaceMember row."""
+    user_id_str = str(user_id)
+    user_uuid = (
+        uuid.UUID(user_id_str)
+        if isinstance(user_id, str) and len(user_id_str) == 36 and "-" in user_id_str
+        else user_id
+    )
+
+    # Check for existing owned workspace
+    ws = None
+    try:
+        ws = db.query(Workspace).filter(Workspace.owner_id == user_uuid).first()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+
+    if ws is None:
+        import re
+
+        uname = (username or "user").strip()
+        slug_base = re.sub(r"[^a-z0-9-]", "-", uname.lower()).strip("-")
+        if len(slug_base) < 3:
+            slug_base = f"ws-{str(user_id)[:8]}"
+        existing_ws = None
+        try:
+            existing_ws = db.query(Workspace).filter(Workspace.slug == slug_base).first()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+        ws_slug = f"{slug_base}-{str(user_id)[:6]}" if existing_ws else slug_base
+
+        ws_id = uuid.uuid4() if not _is_sqlite(db) else new_id("ws")
+        ws = Workspace(
+            id=ws_id,
+            name=f"{uname.capitalize()}'s Workspace",
+            slug=ws_slug,
+            owner_id=user_uuid,
+            tier="free",
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        try:
+            db.add(ws)
+            db.flush()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            try:
+                ws = db.query(Workspace).filter(Workspace.owner_id == user_uuid).first()
+            except Exception:  # noqa: BLE001
+                db.rollback()
+
+    if ws is not None:
+        user_proxy = UserAccount(id=user_uuid, username=username or "user")
+        ensure_owner_membership(db, user_proxy, ws)
+        return ws, "Owner"
+
+    first_ws = db.query(Workspace).first()
+    return first_ws, "Viewer"

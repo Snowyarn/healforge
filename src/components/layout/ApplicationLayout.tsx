@@ -17,6 +17,7 @@ interface ApplicationLayoutProps {
     unread: number;
   };
   onMarkNotificationRead?: (id: string) => void;
+  onSignOut?: () => void;
   children: React.ReactNode;
 }
 
@@ -31,6 +32,7 @@ export const ApplicationLayout: React.FC<ApplicationLayoutProps> = ({
   counts,
   notifications,
   onMarkNotificationRead,
+  onSignOut,
   children,
 }) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -44,6 +46,7 @@ export const ApplicationLayout: React.FC<ApplicationLayoutProps> = ({
         isOpenMobile={isMobileMenuOpen}
         onCloseMobile={() => setIsMobileMenuOpen(false)}
         counts={counts}
+        onSignOut={onSignOut}
       />
 
       {/* Main Container offset by sidebar width on large screens */}
@@ -61,6 +64,7 @@ export const ApplicationLayout: React.FC<ApplicationLayoutProps> = ({
           notifications={notifications}
           onMarkNotificationRead={onMarkNotificationRead}
           onNavigate={onNavigate}
+          onSignOut={onSignOut}
         />
 
         {/* Content Body */}

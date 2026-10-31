@@ -109,7 +109,7 @@ export const DangerZoneSection: React.FC<DangerZoneSectionProps> = ({
               Reset Demo State to Initial Defaults
             </h3>
             <p className="text-xs text-text-secondary mt-1 leading-relaxed max-w-xl">
-              Restore the original test account parameters for Alex Vance, default API keys, and sample audit activity. Useful when testing the interface.
+              Restore default test account parameters, default API keys, and sample audit activity. Useful when testing the interface.
             </p>
           </div>
           <button

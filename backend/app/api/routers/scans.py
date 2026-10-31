@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ...models import SCAN_TYPES, Finding, Project, ScanJob, SourceRevision
+from ...models import SCAN_TYPES, Finding, Project, ScanJob
 from ...models.base import new_id, utcnow
 from ...security import rate_limit as rl
 from ...security.idempotency import (
@@ -146,8 +146,9 @@ def create_scan(body: ScanCreate, ctx: CtxDep, db: DbDep, request: Request, requ
     except Exception:
         idempotency_release(db, guard)
         raise
-    scan_pipeline.submit_scan(job.id, options=body.options.model_dump(), consent=body.consent.model_dump())
-    response = {"scanId": str(job.id), "status": "queued", "poll": f"/api/v1/scans/{job.id}"}
+    scan_pipeline.submit_scan(job.id, options=body.options.model_dump(), consent=body.consent.model_dump(), db=db)
+    db.refresh(job)
+    response = {"scanId": str(job.id), "status": job.status, "poll": f"/api/v1/scans/{job.id}"}
     idempotency_store(db, guard, 202, response)
     return response
 
@@ -185,8 +186,9 @@ def retry_scan(scan_id: str, ctx: CtxDep, db: DbDep, request: Request, request_i
         request_id,
     )
     db.commit()
-    scan_pipeline.submit_scan(job.id)
-    return {"scanId": job.id, "status": "queued", "poll": f"/api/v1/scans/{job.id}"}
+    scan_pipeline.submit_scan(job.id, db=db)
+    db.refresh(job)
+    return {"scanId": str(job.id), "status": job.status, "poll": f"/api/v1/scans/{job.id}"}
 
 
 @router.get("/scans")

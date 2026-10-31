@@ -23,7 +23,7 @@ class Settings(BaseSettings):
         "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9."
         "CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
     )
-    supabase_jwt_secret: str = "super-secret-jwt-token-with-at-least-32-characters-long"
+    supabase_jwt_secret: str = "super-secret-jwt-token-with-at-least-32-characters-long"  # noqa: S105
     supabase_service_role_key: str = ""
 
     # AI Provider: "nebius" (hackathon default) or "nvidia"
@@ -64,14 +64,17 @@ class Settings(BaseSettings):
     # Verification runner — execution stays disabled until isolation is proven.
     runner_verified: bool = False
 
-    # Upload limits
-    max_archive_bytes: int = 20 * 1024 * 1024
+    # Upload limits (strictly aligned with Vercel serverless function payload limits)
+    max_archive_bytes: int = 4 * 1024 * 1024
     max_archive_entries: int = 500
     max_file_bytes: int = 256 * 1024
     max_total_text_bytes: int = 8 * 1024 * 1024
 
     # CORS: exact origins, comma separated
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080,https://healforge-beta.vercel.app"
+
+    # Cookie SameSite policy: "lax" (recommended with reverse proxy / same-site) or "none" (cross-origin)
+    cookie_samesite: str = "lax"
 
     semgrep_available: bool = False
 
@@ -109,6 +112,17 @@ class Settings(BaseSettings):
                 else f"sqlite:////{path.lstrip('/')}"
             )
         return value
+
+    @property
+    def effective_supabase_url(self) -> str:
+        url = self.supabase_url
+        import os
+
+        if os.path.exists("/.dockerenv"):
+            url = url.replace("://127.0.0.1:", "://host.docker.internal:").replace(
+                "://localhost:", "://host.docker.internal:"
+            )
+        return url
 
     @property
     def cors_origin_list(self) -> list[str]:

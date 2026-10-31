@@ -464,6 +464,7 @@ export const endpoints = {
   login: (body: { email: string; password: string }) => api.post<SessionInfo>('/auth/login', body),
   register: (body: { email: string; username: string; password: string }) =>
     api.post<SessionInfo>('/auth/register', body),
+  logout: () => api.post<{ ok: boolean }>('/auth/logout'),
   nvidiaStatus: () => api.get<NvidiaStatusDto>('/nvidia/status'),
   counts: () => api.get<CountsDto>('/counts'),
 
@@ -480,6 +481,9 @@ export const endpoints = {
     return api.postForm<{ revision: RevisionDto; filesWithPossibleSecrets: number }>(
       `/projects/${projectId}/sources`, fd);
   },
+  importDemoSource: (projectId: string, demoKey: string) =>
+    api.post<{ revision: RevisionDto; filesWithPossibleSecrets: number }>(
+      `/projects/${projectId}/demo-source`, { demoKey }),
   listSources: (projectId: string) => api.get<{ revisions: RevisionDto[] }>(`/projects/${projectId}/sources`),
   fileTree: (projectId: string, revisionId?: string) =>
     api.get<{ revisionId: string; revisionDigest: string; tree: FileNodeDto[] }>(`/projects/${projectId}/files`,

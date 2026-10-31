@@ -246,6 +246,7 @@ async def unhandled_handler(request: Request, exc: Exception):  # pragma: no cov
 
 
 API = "/api/v1"
+app.include_router(health.router)
 app.include_router(health.router, prefix=API)
 app.include_router(auth.router, prefix=API)
 app.include_router(projects.router, prefix=API)
