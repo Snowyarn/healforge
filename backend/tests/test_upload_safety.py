@@ -141,3 +141,10 @@ def test_duplicate_project_name_rejected(client):
     client.post("/api/v1/projects", json={"name": "dup", "runtime": "python"})
     r = client.post("/api/v1/projects", json={"name": "dup", "runtime": "python"})
     assert r.status_code == 409
+
+
+def test_demo_source_import(client):
+    pid = _mk_project(client)
+    r = client.post(f"/api/v1/projects/{pid}/demo-source", json={"demoKey": "auth-service"})
+    assert r.status_code == 200
+    assert r.json()["revision"]["textFileCount"] >= 1

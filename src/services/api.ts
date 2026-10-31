@@ -481,6 +481,9 @@ export const endpoints = {
     return api.postForm<{ revision: RevisionDto; filesWithPossibleSecrets: number }>(
       `/projects/${projectId}/sources`, fd);
   },
+  importDemoSource: (projectId: string, demoKey: string) =>
+    api.post<{ revision: RevisionDto; filesWithPossibleSecrets: number }>(
+      `/projects/${projectId}/demo-source`, { demoKey }),
   listSources: (projectId: string) => api.get<{ revisions: RevisionDto[] }>(`/projects/${projectId}/sources`),
   fileTree: (projectId: string, revisionId?: string) =>
     api.get<{ revisionId: string; revisionDigest: string; tree: FileNodeDto[] }>(`/projects/${projectId}/files`,

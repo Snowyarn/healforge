@@ -15,7 +15,7 @@ from ...security import rate_limit as rl
 from ...security.rbac import require_permission
 from ...services import secret_engine, source_store
 from ...services.audit import audit
-from ...services.source_store import SourceFile, SourceRevision
+from ...services.source_store import SourceRevision
 from ...services.upload import ExtractionResult, UploadError, extract_archive
 from ..deps import CtxDep, DbDep, RequestIdDep, api_error
 from ..serializers import (
@@ -263,6 +263,69 @@ async def upload_source(
             "skipped": result.skipped[:50],
         },
         "filesWithPossibleSecrets": secret_count,
+    }
+
+
+class DemoSourceImport(BaseModel):
+    demoKey: str = "auth-service"
+
+
+@router.post("/{project_id}/demo-source")
+def import_demo_source(
+    project_id: str,
+    body: DemoSourceImport,
+    ctx: CtxDep,
+    db: DbDep,
+    request: Request,
+    request_id: RequestIdDep,
+) -> dict:
+    require_permission(db, ctx, "manage_projects")
+    rl.rate_limit(f"upload:{ctx.user.id}", 20, 3600)
+    p = _get_project(db, ctx, project_id)
+
+    files = source_store.get_demo_files(body.demoKey)
+    import hashlib
+
+    digest_payload = "\n".join(f"{f.path}:{f.content_sha256}" for f in sorted(files, key=lambda x: x.path))
+    digest = hashlib.sha256(digest_payload.encode()).hexdigest()
+    filename = f"{body.demoKey}.zip"
+
+    revision = source_store.save_revision(
+        project_id=p.id,
+        digest=digest,
+        archive_filename=filename,
+        branch_label=p.default_branch,
+        files=files,
+        user_id=ctx.user.id,
+    )
+    audit(
+        db,
+        ctx.workspace.id,
+        ctx.user.id,
+        "Security",
+        "Demo source imported",
+        f"Imported pre-loaded demo repository '{body.demoKey}' into '{p.name}': {len(files)} text files, "
+        f"digest {short_digest(digest)}.",
+        request.client.host if request.client else "",
+        "Success",
+        request_id,
+    )
+    db.commit()
+
+    return {
+        "revision": {
+            "id": revision.id,
+            "digest": revision.digest,
+            "shortDigest": short_digest(revision.digest),
+            "archiveFilename": revision.archive_filename,
+            "branchLabel": revision.branch_label,
+            "fileCount": revision.file_count,
+            "textFileCount": revision.text_file_count,
+            "sizeBytes": revision.total_text_bytes,
+            "createdAt": time_ago(revision.created_at),
+            "skipped": [],
+        },
+        "filesWithPossibleSecrets": 0,
     }
 
 

@@ -11,11 +11,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Sequence
 
-DB_PATH = os.environ.get("HEALFORGE_SOURCE_DB", "/tmp/healforge/source_cache.db")
+DB_PATH = os.environ.get("HEALFORGE_SOURCE_DB", ":memory:")
 
 
 def _utcnow() -> datetime:
@@ -51,41 +51,53 @@ class SourceFile:
     line_count: int = 0
 
 
+# Shared in-memory connection container for serverless lifecycle (zero /tmp disk I/O)
+_MEM_STORE: dict[str, sqlite3.Connection | None] = {"conn": None}
+
+
 def _get_conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS source_revisions (
-            id TEXT PRIMARY KEY,
-            project_id TEXT,
-            digest TEXT,
-            archive_filename TEXT,
-            branch_label TEXT,
-            size_bytes INTEGER,
-            file_count INTEGER,
-            text_file_count INTEGER,
-            total_text_bytes INTEGER,
-            created_by TEXT,
-            created_at TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS source_files (
-            id TEXT PRIMARY KEY,
-            revision_id TEXT,
-            path TEXT,
-            is_dir INTEGER,
-            size INTEGER,
-            language TEXT,
-            content TEXT,
-            content_sha256 TEXT,
-            line_count INTEGER
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_rev_proj ON source_revisions (project_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_rev ON source_files (revision_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON source_files (revision_id, path)")
-    conn.commit()
+    conn = _MEM_STORE["conn"]
+    if conn is None:
+        if DB_PATH == ":memory:" or not DB_PATH:
+            conn = sqlite3.connect(
+                "file:healforge_mem?mode=memory&cache=shared", uri=True, check_same_thread=False
+            )
+        else:
+            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS source_revisions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                digest TEXT,
+                archive_filename TEXT,
+                branch_label TEXT,
+                size_bytes INTEGER,
+                file_count INTEGER,
+                text_file_count INTEGER,
+                total_text_bytes INTEGER,
+                created_by TEXT,
+                created_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS source_files (
+                id TEXT PRIMARY KEY,
+                revision_id TEXT,
+                path TEXT,
+                is_dir INTEGER,
+                size INTEGER,
+                language TEXT,
+                content TEXT,
+                content_sha256 TEXT,
+                line_count INTEGER
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rev_proj ON source_revisions (project_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_rev ON source_files (revision_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON source_files (revision_id, path)")
+        conn.commit()
+        _MEM_STORE["conn"] = conn
     return conn
 
 
@@ -316,13 +328,7 @@ def get_file(revision_id: str | uuid.UUID, path: str) -> SourceFile | None:
         )
 
 
-def seed_default_sources():
-    """Populate default source files for seeded Supabase analyses."""
-    # 1. auth-service: revision 40000000-0000-0000-0000-000000000001
-    auth_rev_id = "40000000-0000-0000-0000-000000000001"
-    auth_proj_id = "20000000-0000-0000-0000-000000000001"
-    if not get_revision(auth_rev_id):
-        docker_go_content = """package handlers
+DOCKER_GO_CONTENT = """package handlers
 
 import (
 	"context"
@@ -340,7 +346,8 @@ func HandleDockerAuth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 """
-        merge_js_content = """function deepMerge(target, source) {
+
+MERGE_JS_CONTENT = """function deepMerge(target, source) {
   for (let key in source) {
     if (source.hasOwnProperty(key)) {
       if (typeof source[key] === 'object' && source[key] !== null) {
@@ -356,45 +363,8 @@ func HandleDockerAuth(w http.ResponseWriter, r *http.Request) {
 
 module.exports = { deepMerge };
 """
-        files = [
-            SourceFile(
-                id="sfl-docker-go",
-                revision_id=auth_rev_id,
-                path="api/handlers/docker.go",
-                is_dir=False,
-                size=len(docker_go_content),
-                language="go",
-                content=docker_go_content,
-                content_sha256="sha-docker-go",
-                line_count=len(docker_go_content.splitlines()),
-            ),
-            SourceFile(
-                id="sfl-merge-js",
-                revision_id=auth_rev_id,
-                path="lib/utils/merge.js",
-                is_dir=False,
-                size=len(merge_js_content),
-                language="javascript",
-                content=merge_js_content,
-                content_sha256="sha-merge-js",
-                line_count=len(merge_js_content.splitlines()),
-            ),
-        ]
-        save_revision(
-            project_id=auth_proj_id,
-            digest="c42e190f84a1e94017a421b8c6e2671bf5039a01",
-            archive_filename="auth-service-v1.zip",
-            branch_label="main",
-            files=files,
-            user_id="00000000-0000-0000-0000-000000000001",
-            revision_id=auth_rev_id,
-        )
 
-    # 2. payments-api: revision 40000000-0000-0000-0000-000000000002
-    payments_rev_id = "40000000-0000-0000-0000-000000000002"
-    payments_proj_id = "20000000-0000-0000-0000-000000000002"
-    if not get_revision(payments_rev_id):
-        reports_go_content = """package handlers
+REPORTS_GO_CONTENT = """package handlers
 
 import (
 	"database/sql"
@@ -414,17 +384,108 @@ func GenerateReport(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 """
+
+
+def get_demo_files(demo_key: str) -> list[SourceFile]:
+    """Retrieve pre-packaged mock repository source files for quick demo."""
+    import hashlib
+
+    key = demo_key.strip().lower()
+    if "payment" in key:
+        return [
+            SourceFile(
+                id="demo-reports-go",
+                revision_id="",
+                path="backend/handlers/reports.go",
+                is_dir=False,
+                size=len(REPORTS_GO_CONTENT),
+                language="go",
+                content=REPORTS_GO_CONTENT,
+                content_sha256=hashlib.sha256(REPORTS_GO_CONTENT.encode()).hexdigest(),
+                line_count=len(REPORTS_GO_CONTENT.splitlines()),
+            ),
+        ]
+    return [
+        SourceFile(
+            id="demo-docker-go",
+            revision_id="",
+            path="api/handlers/docker.go",
+            is_dir=False,
+            size=len(DOCKER_GO_CONTENT),
+            language="go",
+            content=DOCKER_GO_CONTENT,
+            content_sha256=hashlib.sha256(DOCKER_GO_CONTENT.encode()).hexdigest(),
+            line_count=len(DOCKER_GO_CONTENT.splitlines()),
+        ),
+        SourceFile(
+            id="demo-merge-js",
+            revision_id="",
+            path="lib/utils/merge.js",
+            is_dir=False,
+            size=len(MERGE_JS_CONTENT),
+            language="javascript",
+            content=MERGE_JS_CONTENT,
+            content_sha256=hashlib.sha256(MERGE_JS_CONTENT.encode()).hexdigest(),
+            line_count=len(MERGE_JS_CONTENT.splitlines()),
+        ),
+    ]
+
+
+def seed_default_sources():
+    """Populate default source files for seeded Supabase analyses."""
+    # 1. auth-service: revision 40000000-0000-0000-0000-000000000001
+    auth_rev_id = "40000000-0000-0000-0000-000000000001"
+    auth_proj_id = "20000000-0000-0000-0000-000000000001"
+    if not get_revision(auth_rev_id):
+        files = [
+            SourceFile(
+                id="sfl-docker-go",
+                revision_id=auth_rev_id,
+                path="api/handlers/docker.go",
+                is_dir=False,
+                size=len(DOCKER_GO_CONTENT),
+                language="go",
+                content=DOCKER_GO_CONTENT,
+                content_sha256="sha-docker-go",
+                line_count=len(DOCKER_GO_CONTENT.splitlines()),
+            ),
+            SourceFile(
+                id="sfl-merge-js",
+                revision_id=auth_rev_id,
+                path="lib/utils/merge.js",
+                is_dir=False,
+                size=len(MERGE_JS_CONTENT),
+                language="javascript",
+                content=MERGE_JS_CONTENT,
+                content_sha256="sha-merge-js",
+                line_count=len(MERGE_JS_CONTENT.splitlines()),
+            ),
+        ]
+        save_revision(
+            project_id=auth_proj_id,
+            digest="c42e190f84a1e94017a421b8c6e2671bf5039a01",
+            archive_filename="auth-service-v1.zip",
+            branch_label="main",
+            files=files,
+            user_id="00000000-0000-0000-0000-000000000001",
+            revision_id=auth_rev_id,
+        )
+
+    # 2. payments-api: revision 40000000-0000-0000-0000-000000000002
+    payments_rev_id = "40000000-0000-0000-0000-000000000002"
+    payments_proj_id = "20000000-0000-0000-0000-000000000002"
+    if not get_revision(payments_rev_id):
         files = [
             SourceFile(
                 id="sfl-reports-go",
                 revision_id=payments_rev_id,
                 path="backend/handlers/reports.go",
                 is_dir=False,
-                size=len(reports_go_content),
+                size=len(REPORTS_GO_CONTENT),
                 language="go",
-                content=reports_go_content,
+                content=REPORTS_GO_CONTENT,
                 content_sha256="sha-reports-go",
-                line_count=len(reports_go_content.splitlines()),
+                line_count=len(REPORTS_GO_CONTENT.splitlines()),
             ),
         ]
         save_revision(

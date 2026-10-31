@@ -64,8 +64,8 @@ class Settings(BaseSettings):
     # Verification runner — execution stays disabled until isolation is proven.
     runner_verified: bool = False
 
-    # Upload limits
-    max_archive_bytes: int = 20 * 1024 * 1024
+    # Upload limits (strictly aligned with Vercel serverless function payload limits)
+    max_archive_bytes: int = 4 * 1024 * 1024
     max_archive_entries: int = 500
     max_file_bytes: int = 256 * 1024
     max_total_text_bytes: int = 8 * 1024 * 1024

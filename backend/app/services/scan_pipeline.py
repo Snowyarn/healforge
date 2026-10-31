@@ -8,8 +8,9 @@ NVIDIA key; otherwise the honest state is logged and recorded on the job.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
@@ -22,12 +23,10 @@ from ..models import (
     ScanJob,
     Workspace,
 )
-from ..models.base import new_id, utcnow
+from ..models.base import utcnow
 from . import ai_provider, nvidia, secret_engine, source_store, static_engine
-from .source_store import SourceFile, SourceRevision
 
-_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="healforge-job")
-_persist_lock = threading.Lock()  # serializes finding-ID assignment + commit across scan threads
+_persist_lock = threading.Lock()  # serializes finding-ID assignment + commit across scan calls
 
 
 def log(db: Session, scan_id: str, message: str, level: str = "INFO") -> None:
@@ -47,11 +46,47 @@ def log(db: Session, scan_id: str, message: str, level: str = "INFO") -> None:
 _job_options: dict[str, dict] = {}
 
 
-def submit_scan(scan_id: str, options: dict | None = None, consent: dict | None = None) -> None:
+def quick_pass_enrich(
+    finding_dict: dict,
+    context: str,
+    source_digest: str,
+    timeout_sec: float = 5.0,
+) -> tuple[dict, object]:
+    """Execute AI enrichment within a strict timeout budget (5s) for Vercel compliance."""
+    async def _async_call():
+        loop = asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    pool,
+                    ai_provider.enrich_finding,
+                    finding_dict,
+                    context,
+                    source_digest,
+                ),
+                timeout=timeout_sec,
+            )
+
+    try:
+        return asyncio.run(_async_call())
+    except TimeoutError:
+        raise TimeoutError("Nebius AI enrichment timed out after 5.0 seconds.") from None
+
+
+def submit_scan(
+    scan_id: str,
+    options: dict | None = None,
+    consent: dict | None = None,
+    db: Session | None = None,
+) -> None:
+    """Synchronous scan execution for Vercel serverless microVM compliance."""
     sid = str(scan_id)
     if options is not None:
         _job_options[sid] = {"options": options, "consent": consent or {}}
-    _executor.submit(_run_scan_safe, scan_id)
+    if db is not None:
+        run_scan(db, scan_id)
+    else:
+        _run_scan_safe(scan_id)
 
 
 def _run_scan_safe(scan_id: str) -> None:
@@ -387,7 +422,7 @@ def run_scan(db: Session, scan_id: str) -> None:
             db.query(Finding)
             .filter(Finding.scan_id == job.id)
             .order_by(Finding.cvss_score.desc())
-            .limit(ai_provider.MAX_FINDINGS_PER_SCAN_ENRICHMENT)
+            .limit(1)  # Vercel serverless quick pass: top finding under 5s budget
             .all()
         )
         enriched = failed = 0
@@ -402,7 +437,7 @@ def run_scan(db: Session, scan_id: str) -> None:
                 secret_hits = secret_engine.scan_text(src.path, context)
                 context = secret_engine.redact_secrets(context, secret_hits)
             try:
-                analysis, prov = ai_provider.enrich_finding(
+                analysis, prov = quick_pass_enrich(
                     {
                         "title": f.title,
                         "cwe": f.cwe_id or "CWE-000",
@@ -413,6 +448,7 @@ def run_scan(db: Session, scan_id: str) -> None:
                     },
                     context,
                     revision.digest,
+                    timeout_sec=5.0,
                 )
                 f.metadata_ = {
                     **(f.metadata_ or {}),
@@ -433,7 +469,20 @@ def run_scan(db: Session, scan_id: str) -> None:
                 f.confidence = "high"
                 db.commit()
                 enriched += 1
-                log(db, scan_id, f"[MODEL] Enriched {f.display_id} ({f.title[:60]}).")
+                log(db, scan_id, f"[MODEL] Quick pass enriched {f.display_id} ({f.title[:60]}).")
+            except TimeoutError:
+                failed += 1
+                log(
+                    db,
+                    scan_id,
+                    "[MODEL] Deep AI analysis timed out (Vercel 5s quick-pass limit reached); "
+                    "static AST findings preserved.",
+                    "WARN",
+                )
+                job.safe_error_message = (
+                    "Deep AI analysis timed out (5s serverless quick-pass limit); static AST findings preserved."
+                )
+                db.commit()
             except (ai_provider.AiRequestError, nvidia.NvidiaRequestError) as exc:
                 failed += 1
                 log(db, scan_id, f"[MODEL] Enrichment failed for {f.display_id}: {exc.code} — {exc.message}", "WARN")
